@@ -1,0 +1,1541 @@
+import React, { useState, useRef, useEffect, useMemo } from "react";
+import { createRoot } from "react-dom/client";
+import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
+import ReactMarkdown from 'react-markdown';
+
+// --- Types ---
+
+type Priority = "Low" | "Medium" | "High";
+type Status = "To Do" | "In Progress" | "Done";
+type SortMode = "default" | "priority" | "date";
+type ViewMode = "board" | "timeline" | "insights";
+
+interface Subtask {
+  id: string;
+  title: string;
+  completed: boolean;
+}
+
+interface Task {
+  id: string;
+  title: string;
+  description: string;
+  status: Status;
+  priority: Priority;
+  tags: string[];
+  subtasks: Subtask[];
+  dueDate?: string;
+  storyPoints?: number;
+}
+
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'model';
+  text: string;
+}
+
+// Mock Data Type for Screenpipe
+interface ScreenpipeEvent {
+  id: string;
+  timestamp: string; // ISO string
+  appName: string;
+  windowTitle: string;
+  content: string;
+  type: 'OCR' | 'Audio' | 'UI';
+  confidence?: number;
+}
+
+interface RPGItem {
+  id: string;
+  name: string;
+  type: 'Head' | 'Body' | 'MainHand' | 'OffHand';
+  bonus: string;
+  rarity: 'Common' | 'Rare' | 'Epic' | 'Legendary';
+  icon: string;
+  desc?: string;
+}
+
+interface RPGSkill {
+  id: string;
+  name: string;
+  level: number;
+  maxLevel: number;
+  description: string;
+  icon: string;
+}
+
+interface RPGStats {
+  level: number;
+  title: string;
+  strength: number; // Coding
+  charisma: number; // Communication
+  wisdom: number;   // Focus
+  chaos: number;    // Entertainment
+  xp: number;
+  nextLevelXp: number;
+}
+
+// --- Constants & Mappings ---
+
+const STATUS_LABELS: Record<Status, string> = {
+  "To Do": "待办",
+  "In Progress": "进行中",
+  "Done": "已完成"
+};
+
+const PRIORITY_LABELS: Record<Priority, string> = {
+  "Low": "低",
+  "Medium": "中",
+  "High": "高"
+};
+
+const SORT_LABELS: Record<SortMode, string> = {
+  "default": "默认排序",
+  "priority": "优先级 (高→低)",
+  "date": "截止日期 (近→远)"
+};
+
+// --- Icons ---
+
+const PlusIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+);
+const SparklesIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L12 3Z"/></svg>
+);
+const ListTodoIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
+);
+const XIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+);
+const GripVerticalIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="9" cy="12" r="1"/><circle cx="9" cy="5" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="19" r="1"/></svg>
+);
+const CheckIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className={className}><polyline points="20 6 9 17 4 12"/></svg>
+);
+const LayoutGridIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+);
+const SearchIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+);
+const CalendarIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>
+);
+const SendIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={className}><line x1="22" x2="11" y1="2" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+);
+const BotIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>
+);
+const TrashIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+);
+const TagIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z"/><path d="M7 7h.01"/></svg>
+);
+const SortIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m3 16 4 4 4-4"/><path d="M7 20V4"/><path d="m21 8-4-4-4 4"/><path d="M17 4v16"/></svg>
+);
+const ClockIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+);
+const ChartPieIcon = ({ className }: { className?: string }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>
+);
+const BellIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+);
+const LaptopIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect width="20" height="16" x="2" y="3" rx="2"/><path d="M6 21h12"/></svg>
+);
+const MessageSquareIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+);
+const EyeIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+);
+const FileTextIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>
+);
+const CopyIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+);
+
+// --- Initial Data ---
+
+const initialTasks: Task[] = [
+  {
+    id: "t-1",
+    title: "设计登录页面 🎨",
+    description: "为移动端应用设计一个简洁、现代的登录界面，包含第三方登录选项。色调要温馨。",
+    status: "To Do",
+    priority: "High",
+    tags: ["UI/UX", "Mobile"],
+    dueDate: "2023-11-15",
+    storyPoints: 5,
+    subtasks: [
+        { id: "st-1", title: "收集灵感参考", completed: true },
+        { id: "st-2", title: "绘制线框图", completed: false }
+    ]
+  },
+  {
+    id: "t-2",
+    title: "集成 Gemini API 🤖",
+    description: "使用 Google Gemini Flash 模型实现文本生成功能。确保响应速度快。",
+    status: "In Progress",
+    priority: "High",
+    tags: ["Dev", "AI"],
+    dueDate: "2023-11-10",
+    storyPoints: 8,
+    subtasks: []
+  },
+  {
+    id: "t-3",
+    title: "编写 README 文档 📝",
+    description: "详细说明项目启动流程和环境变量配置。",
+    status: "Done",
+    priority: "Low",
+    tags: ["Docs"],
+    storyPoints: 2,
+    subtasks: []
+  }
+];
+
+// --- Mock Data for Timeline & Insights ---
+
+const mockTimelineEvents: ScreenpipeEvent[] = [
+    { id: "e-1", timestamp: "2023-11-12T09:30:00", appName: "Visual Studio Code", windowTitle: "index.tsx - GeminiTask", content: "const ai = new GoogleGenAI...", type: "OCR" },
+    { id: "e-2", timestamp: "2023-11-12T09:45:00", appName: "Google Chrome", windowTitle: "Gemini API Docs", content: "generateContentStream is best for...", type: "OCR" },
+    { id: "e-3", timestamp: "2023-11-12T10:15:00", appName: "Slack", windowTitle: "#project-sync", content: "Hey, can we update the README?", type: "OCR" },
+    { id: "e-4", timestamp: "2023-11-12T11:00:00", appName: "Zoom", windowTitle: "Weekly Sync", content: "Meeting transcript: Discussing Q4 goals...", type: "Audio" },
+    { id: "e-5", timestamp: "2023-11-12T13:30:00", appName: "Figma", windowTitle: "Login Screen V2", content: "Frame 1024: Button / Primary", type: "UI" },
+];
+
+const mockRPGStats: RPGStats = {
+    level: 12,
+    title: "代码魔导师",
+    strength: 85, // Coding
+    charisma: 40, // Communication
+    wisdom: 92,   // Focus
+    chaos: 15,    // Entertainment
+    xp: 3450,
+    nextLevelXp: 5000
+};
+
+const mockRPGDetails = {
+  items: [
+    { id: 'i1', name: '降噪耳机', type: 'Head', bonus: '+15 专注度', rarity: 'Epic', icon: '🎧', desc: '隔绝世俗喧嚣，只留心流。' },
+    { id: 'i2', name: '格子衬衫', type: 'Body', bonus: '+5 代码力', rarity: 'Common', icon: '👕', desc: '程序员的标准皮肤，增加亲和力。' },
+    { id: 'i3', name: 'HHKB 键盘', type: 'MainHand', bonus: '+20 代码力', rarity: 'Legendary', icon: '⌨️', desc: '指尖跳舞，Bug 退散！' },
+    { id: 'i4', name: '冰美式', type: 'OffHand', bonus: '+10 精神', rarity: 'Rare', icon: '☕', desc: '续命神水，不可或缺。' },
+  ] as RPGItem[],
+  skills: [
+    { id: 's1', name: '快速重构', level: 5, maxLevel: 10, description: '重构代码时减少 30% 的 Bug 率', icon: '⚡' },
+    { id: 's2', name: '摸鱼', level: 99, maxLevel: 100, description: '看起来在工作，其实在看 V2EX', icon: '🐟' },
+    { id: 's3', name: '文档编写', level: 3, maxLevel: 10, description: '写出的文档有时候自己也看不懂', icon: '📝' },
+    { id: 's4', name: 'Debug 之眼', level: 8, maxLevel: 10, description: '一眼看穿内存泄漏', icon: '👁️' },
+  ] as RPGSkill[]
+};
+
+const mockDailyReport = `
+# 📅 日报 (2023-11-12)
+
+### 🚀 开发进度
+- **GeminiTask**: 完成了 API 的流式响应集成。
+- **Bugfix**: 修复了移动端布局无法滑动的问题。
+
+### 💬 沟通与会议
+- 参加了 **Weekly Sync** (11:00 - 12:00)。
+- 在 Slack 上确认了 README 文档的更新需求。
+
+### 📚 调研
+- 查阅了 Google Gemini API 关于 \`generateContentStream\` 的文档。
+`;
+
+const mockWeeklyReport = `
+# 🗓️ 周报 (2023-11-06 ~ 2023-11-12)
+
+### 🌟 本周亮点
+- **核心功能**: 完成了 Screenpipe 本地数据流的打通。
+- **AI 集成**: 成功调试了 Gemini Flash 模型，响应速度提升 30%。
+
+### 🚧 遇到的挑战
+- **性能问题**: 大量 OCR 数据导致前端渲染卡顿，已通过虚拟列表优化。
+- **权限**: macOS 屏幕录制权限申请流程较为繁琐。
+
+### 📈 下周计划
+- [ ] 完善时间轴组件的交互动画。
+- [ ] 设计新的 RPG 角色升级特效。
+`;
+
+// --- Helper Functions ---
+
+const getTagColors = (tag: string) => {
+  const colors = [
+    "bg-rose-100 text-rose-700 border-rose-200",
+    "bg-blue-100 text-blue-700 border-blue-200",
+    "bg-emerald-100 text-emerald-700 border-emerald-200",
+    "bg-amber-100 text-amber-700 border-amber-200",
+    "bg-violet-100 text-violet-700 border-violet-200",
+    "bg-cyan-100 text-cyan-700 border-cyan-200",
+    "bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200",
+    "bg-lime-100 text-lime-700 border-lime-200",
+  ];
+  // Simple hash to pick a consistent color for the same tag
+  let hash = 0;
+  for (let i = 0; i < tag.length; i++) {
+    hash = tag.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % colors.length;
+  return colors[index];
+};
+
+// --- Components ---
+
+const PriorityBadge = ({ priority }: { priority: Priority }) => {
+  const colors = {
+    Low: "bg-teal-100 text-teal-700 border-teal-200",
+    Medium: "bg-amber-100 text-amber-700 border-amber-200",
+    High: "bg-rose-100 text-rose-700 border-rose-200",
+  };
+  return (
+    <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold tracking-wide shadow-sm ${colors[priority]}`}>
+      {PRIORITY_LABELS[priority]}
+    </span>
+  );
+};
+
+const TagPill = ({ text, onRemove }: { text: string, onRemove?: () => void }) => {
+    const colorClass = getTagColors(text);
+    return (
+        <span className={`flex items-center gap-1 px-2.5 py-0.5 text-[11px] font-bold rounded-full border shadow-sm transition-all hover:brightness-95 ${colorClass}`}>
+            #{text}
+            {onRemove && (
+                <button onClick={onRemove} className="ml-1 hover:text-current opacity-60 hover:opacity-100">
+                    <XIcon className="w-3 h-3" />
+                </button>
+            )}
+        </span>
+    );
+}
+
+const Modal = ({ isOpen, onClose, children }: { isOpen: boolean; onClose: () => void; children: React.ReactNode }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/20 backdrop-blur-sm animate-in fade-in duration-300">
+      <div className="bg-white/95 backdrop-blur-xl rounded-3xl shadow-2xl w-full max-w-2xl overflow-hidden animate-in zoom-in-95 slide-in-from-bottom-4 duration-300 border border-white/50 ring-1 ring-stone-900/5 flex flex-col max-h-[95vh]">
+        {children}
+      </div>
+    </div>
+  );
+};
+
+const RPGDetailModal = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) => {
+  if (!isOpen) return null;
+
+  const getRarityColor = (rarity: RPGItem['rarity']) => {
+    switch (rarity) {
+      case 'Legendary': return 'text-amber-500 bg-amber-50 border-amber-200';
+      case 'Epic': return 'text-purple-500 bg-purple-50 border-purple-200';
+      case 'Rare': return 'text-blue-500 bg-blue-50 border-blue-200';
+      default: return 'text-stone-500 bg-stone-50 border-stone-200';
+    }
+  };
+
+  return (
+    <Modal isOpen={isOpen} onClose={onClose}>
+        <div className="flex flex-col h-full bg-gradient-to-br from-violet-50/50 via-white to-fuchsia-50/50">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between bg-white/60">
+                <h3 className="font-black text-xl text-stone-700 flex items-center gap-2">
+                    <span className="text-2xl">🧙‍♂️</span> 角色详情
+                </h3>
+                <button onClick={onClose} className="text-stone-400 hover:text-stone-700 p-2 rounded-xl hover:bg-stone-100 transition-all">
+                  <XIcon className="w-6 h-6" />
+                </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                {/* Top Section: Stats & Equipment */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-8">
+                    
+                    {/* Left: Avatar & Basic Stats */}
+                    <div className="space-y-4 text-center">
+                        <div className="w-32 h-32 bg-white rounded-[2rem] mx-auto flex items-center justify-center text-6xl shadow-[0_10px_40px_-10px_rgba(124,58,237,0.3)] border-4 border-white ring-4 ring-violet-100 transform hover:scale-105 transition-transform">
+                            🧙‍♂️
+                        </div>
+                        <div>
+                            <h2 className="text-2xl font-black text-stone-800">{mockRPGStats.title}</h2>
+                            <p className="text-violet-500 font-bold">Lv.{mockRPGStats.level}</p>
+                        </div>
+                         <div className="bg-white/60 p-4 rounded-2xl border border-white/60 shadow-sm text-left space-y-3">
+                            {[
+                                { label: "代码力", val: mockRPGStats.strength, icon: "💻" },
+                                { label: "沟通力", val: mockRPGStats.charisma, icon: "💬" },
+                                { label: "专注度", val: mockRPGStats.wisdom, icon: "🧠" },
+                                { label: "摸鱼值", val: mockRPGStats.chaos, icon: "🤪" },
+                            ].map(s => (
+                                <div key={s.label} className="flex items-center justify-between text-sm">
+                                    <span className="text-stone-500 font-bold flex items-center gap-2">{s.icon} {s.label}</span>
+                                    <span className="font-mono font-bold text-stone-700">{s.val}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    {/* Right: Equipment Slots */}
+                    <div className="space-y-4">
+                         <h4 className="text-sm font-bold text-stone-400 uppercase tracking-wider mb-2">当前装备</h4>
+                         <div className="grid grid-cols-1 gap-3">
+                            {mockRPGDetails.items.map(item => (
+                                <div key={item.id} className={`flex items-center gap-3 p-3 rounded-2xl border ${getRarityColor(item.rarity)} bg-opacity-40 hover:bg-opacity-60 transition-colors group cursor-pointer`}>
+                                    <div className="w-10 h-10 flex items-center justify-center bg-white rounded-xl text-xl shadow-sm">
+                                        {item.icon}
+                                    </div>
+                                    <div className="flex-1">
+                                        <div className="flex items-center justify-between">
+                                            <span className="font-bold text-stone-700 text-sm">{item.name}</span>
+                                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-white/50 uppercase opacity-70">{item.type}</span>
+                                        </div>
+                                        <div className="flex items-center justify-between mt-0.5">
+                                             <span className="text-[10px] text-stone-500">{item.desc}</span>
+                                             <span className="text-[10px] font-bold text-emerald-600">{item.bonus}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                         </div>
+                    </div>
+                </div>
+
+                {/* Skills Section */}
+                <div>
+                     <h4 className="text-sm font-bold text-stone-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                        <SparklesIcon className="w-4 h-4" />
+                        技能树
+                     </h4>
+                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        {mockRPGDetails.skills.map(skill => (
+                            <div key={skill.id} className="bg-white p-4 rounded-2xl border border-stone-100 shadow-sm hover:shadow-md transition-all group">
+                                <div className="flex items-start gap-3">
+                                    <div className="w-10 h-10 rounded-xl bg-stone-50 flex items-center justify-center text-2xl group-hover:scale-110 transition-transform">
+                                        {skill.icon}
+                                    </div>
+                                    <div className="flex-1">
+                                        <div className="flex justify-between items-center mb-1">
+                                            <h5 className="font-bold text-stone-700 text-sm">{skill.name}</h5>
+                                            <span className="text-[10px] font-bold bg-stone-100 text-stone-500 px-2 py-0.5 rounded-full">Lv.{skill.level}/{skill.maxLevel}</span>
+                                        </div>
+                                        <p className="text-xs text-stone-400 leading-snug">{skill.description}</p>
+                                        
+                                        {/* Skill Bar */}
+                                        <div className="mt-3 h-1.5 w-full bg-stone-100 rounded-full overflow-hidden">
+                                            <div className="h-full bg-gradient-to-r from-violet-400 to-fuchsia-400" style={{ width: `${(skill.level / skill.maxLevel) * 100}%` }}></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                     </div>
+                </div>
+
+            </div>
+        </div>
+    </Modal>
+  );
+}
+
+// --- New View Components ---
+
+const TimelineView = () => {
+  return (
+    <div className="h-full overflow-y-auto p-6 pb-24 max-w-4xl mx-auto">
+        <div className="mb-8">
+            <h2 className="text-2xl font-black text-stone-700 mb-2">时光回溯 🕰️</h2>
+            <p className="text-stone-500">基于 Screenpipe 捕获的数字记忆</p>
+        </div>
+
+        <div className="relative pl-8 border-l-2 border-rose-100 space-y-8">
+            {mockTimelineEvents.map((event, idx) => (
+                <div key={event.id} className="relative group">
+                    {/* Time Dot */}
+                    <div className="absolute -left-[41px] top-3 w-5 h-5 bg-white border-4 border-rose-200 rounded-full shadow-sm group-hover:scale-125 group-hover:border-rose-400 transition-all z-10"></div>
+                    
+                    {/* Card */}
+                    <div className="glass p-4 rounded-2xl border border-white/60 shadow-sm hover:shadow-md transition-all relative hover:-translate-y-1 cursor-pointer">
+                        <div className="flex justify-between items-start mb-2">
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs font-bold bg-stone-100 text-stone-500 px-2 py-0.5 rounded-md">
+                                    {new Date(event.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                                </span>
+                                <span className={`text-xs font-bold px-2 py-0.5 rounded-md border ${event.type === 'Audio' ? 'bg-purple-50 text-purple-600 border-purple-100' : event.type === 'UI' ? 'bg-pink-50 text-pink-600 border-pink-100' : 'bg-blue-50 text-blue-600 border-blue-100'}`}>
+                                    {event.type}
+                                </span>
+                            </div>
+                            <button className="text-xs font-bold text-rose-500 hover:bg-rose-50 px-2 py-1 rounded-lg transition-colors opacity-0 group-hover:opacity-100">
+                                恢复上下文 ↗
+                            </button>
+                        </div>
+                        
+                        <div className="flex items-center gap-2 mb-1">
+                            <LaptopIcon className="w-4 h-4 text-stone-400" />
+                            <h3 className="font-bold text-stone-700">{event.appName}</h3>
+                            <span className="text-stone-300">|</span>
+                            <span className="text-sm text-stone-500 truncate max-w-[200px] sm:max-w-md">{event.windowTitle}</span>
+                        </div>
+                        
+                        <p className="text-sm text-stone-500 mt-2 bg-stone-50/50 p-2 rounded-lg italic border border-stone-100/50">
+                            "{event.content.substring(0, 80)}..."
+                        </p>
+                    </div>
+                </div>
+            ))}
+        </div>
+    </div>
+  );
+};
+
+const InsightsView = ({ onOpenRPGDetail }: { onOpenRPGDetail: () => void }) => {
+    return (
+        <div className="h-full overflow-y-auto p-6 pb-24 grid grid-cols-1 lg:grid-cols-2 gap-6 max-w-6xl mx-auto">
+            
+            {/* Left Col: RPG Persona */}
+            <div className="space-y-6">
+                 <div className="bg-white/80 backdrop-blur-xl rounded-[2rem] p-8 border border-white shadow-xl shadow-violet-100/50 relative overflow-hidden group hover-lift">
+                        {/* Subtle Gradient Blob in background */}
+                        <div className="absolute -top-24 -right-24 w-64 h-64 bg-gradient-to-br from-violet-100/40 to-fuchsia-100/40 rounded-full blur-3xl -z-10 pointer-events-none group-hover:scale-125 transition-transform duration-1000"></div>
+                        <div className="absolute -bottom-24 -left-24 w-64 h-64 bg-gradient-to-tr from-sky-100/40 to-emerald-100/40 rounded-full blur-3xl -z-10 pointer-events-none group-hover:scale-125 transition-transform duration-1000"></div>
+
+                        <div className="relative z-10">
+                            <div className="flex items-start gap-6 mb-8">
+                                {/* Avatar/Icon */}
+                                <div className="w-24 h-24 bg-white rounded-3xl flex items-center justify-center text-5xl shadow-[0_8px_16px_-4px_rgba(0,0,0,0.05)] border border-white ring-4 ring-stone-50/50 transform rotate-3 group-hover:rotate-0 transition-transform duration-500">
+                                    🧙‍♂️
+                                </div>
+                                <div className="flex-1 pt-1">
+                                    <div className="text-violet-500 text-xs font-extrabold uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                                        <span className="relative flex h-2 w-2">
+                                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
+                                          <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500"></span>
+                                        </span>
+                                        当前角色
+                                    </div>
+                                    <h2 className="text-3xl font-black text-stone-800 tracking-tight mb-2">{mockRPGStats.title}</h2>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <div className="text-[10px] font-bold text-white bg-gradient-to-r from-violet-400 to-fuchsia-400 px-3 py-1 rounded-full shadow-sm shadow-violet-200">
+                                            Lv.{mockRPGStats.level}
+                                        </div>
+                                        <div className="text-xs font-bold text-stone-400 bg-stone-100 px-2 py-1 rounded-lg">
+                                            EXP: <span className="text-stone-600">{mockRPGStats.xp}</span> / {mockRPGStats.nextLevelXp}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-5">
+                                {/* Stats */}
+                                {[
+                                    { label: "代码力", sub: "Strength", val: mockRPGStats.strength, color: "from-emerald-400 to-emerald-300", text: "text-emerald-600" },
+                                    { label: "沟通力", sub: "Charisma", val: mockRPGStats.charisma, color: "from-amber-400 to-amber-300", text: "text-amber-600" },
+                                    { label: "专注度", sub: "Wisdom", val: mockRPGStats.wisdom, color: "from-sky-400 to-sky-300", text: "text-sky-600" },
+                                    { label: "摸鱼值", sub: "Chaos", val: mockRPGStats.chaos, color: "from-rose-400 to-rose-300", text: "text-rose-600" }
+                                ].map(stat => (
+                                    <div key={stat.label}>
+                                        <div className="flex justify-between text-xs font-bold mb-2 items-end">
+                                            <span className="text-stone-600 flex items-center gap-1.5">
+                                                {stat.label}
+                                                <span className="text-[10px] text-stone-400 font-medium bg-white px-1.5 rounded-md border border-stone-100">{stat.sub}</span>
+                                            </span>
+                                            <span className={stat.text}>{stat.val}/100</span>
+                                        </div>
+                                        {/* Track */}
+                                        <div className="h-3 bg-stone-100 rounded-full overflow-hidden border border-stone-100 shadow-inner">
+                                            {/* Bar */}
+                                            <div style={{ width: `${stat.val}%` }} className={`h-full bg-gradient-to-r ${stat.color} shadow-[0_2px_4px_rgba(0,0,0,0.05)] relative overflow-hidden transition-all duration-1000 ease-out`}>
+                                                <div className="absolute inset-0 bg-white/20 w-full h-full" style={{ backgroundImage: 'linear-gradient(45deg,rgba(255,255,255,.15) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.15) 50%,rgba(255,255,255,.15) 75%,transparent 75%,transparent)', backgroundSize: '1rem 1rem' }}></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className="mt-8">
+                                <button 
+                                    onClick={onOpenRPGDetail}
+                                    className="w-full group/btn relative overflow-hidden rounded-xl bg-white border border-violet-100 p-3 hover:border-violet-200 hover:shadow-md hover:shadow-violet-100 transition-all"
+                                >
+                                   <div className="absolute inset-0 bg-gradient-to-r from-violet-50 to-fuchsia-50 opacity-0 group-hover/btn:opacity-100 transition-opacity"></div>
+                                   <span className="relative text-xs font-bold text-violet-600 flex items-center justify-center gap-2">
+                                      ✨ 查看详细属性 & 装备
+                                   </span>
+                                </button>
+                            </div>
+                        </div>
+                   </div>
+
+                {/* Usage Chart Placeholder */}
+                <div className="glass p-6 rounded-3xl border border-white/60">
+                    <h3 className="font-bold text-stone-700 mb-4 flex items-center gap-2">
+                        <EyeIcon className="w-5 h-5 text-stone-400"/>
+                        应用专注分布
+                    </h3>
+                    <div className="flex gap-4 h-40 items-end justify-center px-4">
+                        {[
+                            { name: 'VS Code', h: 'h-[80%]', color: 'bg-blue-400' },
+                            { name: 'Chrome', h: 'h-[60%]', color: 'bg-amber-400' },
+                            { name: 'Slack', h: 'h-[30%]', color: 'bg-rose-400' },
+                            { name: 'Zoom', h: 'h-[20%]', color: 'bg-purple-400' },
+                        ].map(bar => (
+                            <div key={bar.name} className="flex-1 flex flex-col items-center gap-2 group">
+                                <div className={`w-full ${bar.h} ${bar.color} rounded-t-xl opacity-80 group-hover:opacity-100 transition-all relative`}>
+                                    <div className="absolute -top-8 left-1/2 -translate-x-1/2 bg-stone-800 text-white text-[10px] px-2 py-1 rounded opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+                                        2h 15m
+                                    </div>
+                                </div>
+                                <span className="text-[10px] font-bold text-stone-500 truncate w-full text-center">{bar.name}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+
+            {/* Right Col: Reports */}
+            <div className="flex flex-col gap-6 h-full">
+                {/* Auto Daily Report */}
+                <div className="glass p-8 rounded-3xl border border-white/60 flex flex-col flex-1 min-h-[400px]">
+                     <div className="flex justify-between items-center mb-6">
+                        <h3 className="font-bold text-stone-700 flex items-center gap-2">
+                            <FileTextIcon className="w-5 h-5 text-stone-400"/>
+                            自动日报 (Daily Report)
+                        </h3>
+                        <button className="flex items-center gap-1 text-xs font-bold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg hover:bg-emerald-100 transition-colors">
+                            <CopyIcon className="w-3.5 h-3.5" />
+                            复制
+                        </button>
+                     </div>
+                     
+                     <div className="flex-1 bg-white/50 rounded-xl p-6 border border-stone-100 overflow-y-auto font-mono text-sm text-stone-600 leading-relaxed shadow-inner">
+                        <div className="prose prose-sm prose-stone max-w-none">
+                            <ReactMarkdown>{mockDailyReport}</ReactMarkdown>
+                        </div>
+                     </div>
+                     
+                     <div className="mt-4 text-center">
+                        <button className="text-xs font-bold text-stone-400 hover:text-rose-500 flex items-center justify-center gap-1 mx-auto transition-colors">
+                            <SparklesIcon className="w-3 h-3" />
+                            重新生成
+                        </button>
+                     </div>
+                </div>
+
+                {/* Auto Weekly Report */}
+                <div className="glass p-8 rounded-3xl border border-white/60 flex flex-col flex-1 min-h-[400px]">
+                     <div className="flex justify-between items-center mb-6">
+                        <h3 className="font-bold text-stone-700 flex items-center gap-2">
+                            <ChartPieIcon className="w-5 h-5 text-stone-400"/>
+                            自动周报 (Weekly Insight)
+                        </h3>
+                        <button className="flex items-center gap-1 text-xs font-bold text-violet-600 bg-violet-50 px-3 py-1.5 rounded-lg hover:bg-violet-100 transition-colors">
+                            <CopyIcon className="w-3.5 h-3.5" />
+                            复制
+                        </button>
+                     </div>
+                     
+                     <div className="flex-1 bg-white/50 rounded-xl p-6 border border-stone-100 overflow-y-auto font-mono text-sm text-stone-600 leading-relaxed shadow-inner">
+                        <div className="prose prose-sm prose-stone max-w-none">
+                            <ReactMarkdown>{mockWeeklyReport}</ReactMarkdown>
+                        </div>
+                     </div>
+                     
+                     <div className="mt-4 text-center">
+                        <button className="text-xs font-bold text-stone-400 hover:text-violet-500 flex items-center justify-center gap-1 mx-auto transition-colors">
+                            <SparklesIcon className="w-3 h-3" />
+                            重新生成
+                        </button>
+                     </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- Main App Component ---
+
+const App = () => {
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [viewMode, setViewMode] = useState<ViewMode>("board");
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isRPGModalOpen, setIsRPGModalOpen] = useState(false);
+  const [currentTask, setCurrentTask] = useState<Task | null>(null);
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [tagInput, setTagInput] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("default");
+  
+  const [aiStreaming, setAiStreaming] = useState(false);
+  const [streamingContent, setStreamingContent] = useState("");
+
+  const [chatInput, setChatInput] = useState("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    { id: 'welcome', role: 'model', text: '嗨！我是你的可爱助手 🌸。我可以帮你管理任务，比如“帮我创建一个明天截止的高优先级任务”。' }
+  ]);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  // Drafts State
+  const [showDrafts, setShowDrafts] = useState(false);
+
+  const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY }), []);
+
+  // --- CRUD Operations ---
+
+  const addNewTask = (status: Status) => {
+    const newTask: Task = {
+      id: `t-${Date.now()}`,
+      title: "新想法 ✨",
+      description: "",
+      status,
+      priority: "Medium",
+      tags: [],
+      subtasks: [],
+      storyPoints: 1
+    };
+    setTasks([...tasks, newTask]);
+    openTaskDetail(newTask);
+  };
+
+  const createAiTask = (args: { title: string; description?: string; priority?: string; dueDate?: string }) => {
+    const priorityMap: Record<string, Priority> = {
+        "Low": "Low", "Medium": "Medium", "High": "High"
+    };
+    const priority: Priority = priorityMap[args.priority || "Medium"] || "Medium";
+
+    const newTask: Task = {
+        id: `t-ai-${Date.now()}-${Math.random()}`,
+        title: args.title,
+        description: args.description || "",
+        status: "To Do",
+        priority: priority,
+        tags: ["AI Generated"],
+        subtasks: [],
+        storyPoints: 1,
+        dueDate: args.dueDate
+    };
+    setTasks(prev => [...prev, newTask]);
+    return newTask;
+  };
+
+  const updateTask = (updatedTask: Task) => {
+    setTasks(tasks.map(t => t.id === updatedTask.id ? updatedTask : t));
+    setCurrentTask(updatedTask);
+  };
+
+  const deleteTask = (taskId: string) => {
+    setTasks(tasks.filter(t => t.id !== taskId));
+    if (currentTask?.id === taskId) closeModal();
+  };
+
+  const openTaskDetail = (task: Task) => {
+    setCurrentTask(task);
+    setTagInput("");
+    setIsModalOpen(true);
+    setStreamingContent("");
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setCurrentTask(null);
+    setStreamingContent("");
+    setTagInput("");
+  };
+
+  // --- Sorting Logic ---
+
+  const toggleSort = () => {
+      const modes: SortMode[] = ["default", "priority", "date"];
+      const nextIndex = (modes.indexOf(sortMode) + 1) % modes.length;
+      setSortMode(modes[nextIndex]);
+  };
+
+  // --- Drag and Drop ---
+
+  const handleDragStart = (e: React.DragEvent, taskId: string) => {
+    setDraggedTaskId(taskId);
+    e.dataTransfer.effectAllowed = "move";
+    setTimeout(() => {
+       // Optional: Add class to body or container to indicate dragging
+    }, 0);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+
+  const handleDrop = (e: React.DragEvent, targetStatus: Status) => {
+    e.preventDefault();
+    if (!draggedTaskId) return;
+
+    const task = tasks.find(t => t.id === draggedTaskId);
+    if (task && task.status !== targetStatus) {
+      updateTask({ ...task, status: targetStatus });
+    }
+    setDraggedTaskId(null);
+  };
+
+  // --- Tag Handling ---
+  
+  const handleAddTag = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && tagInput.trim() && currentTask) {
+      e.preventDefault();
+      const newTag = tagInput.trim();
+      if (!currentTask.tags.includes(newTag)) {
+        updateTask({ ...currentTask, tags: [...currentTask.tags, newTag] });
+      }
+      setTagInput("");
+    }
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    if (!currentTask) return;
+    updateTask({ ...currentTask, tags: currentTask.tags.filter(t => t !== tagToRemove) });
+  };
+
+  // --- AI Task Helpers ---
+
+  const handleAIPolish = async () => {
+    if (!currentTask || !currentTask.description) return;
+    setAiStreaming(true);
+    setStreamingContent("");
+
+    try {
+      const prompt = `请用更有创意、更清晰、更吸引人的语气重写以下任务描述。可以是稍微活泼一点的风格。
+      
+      任务标题: ${currentTask.title}
+      原描述: ${currentTask.description}`;
+
+      const response = await ai.models.generateContentStream({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+
+      let fullText = "";
+      for await (const chunk of response) {
+        const text = chunk.text;
+        if (text) {
+          fullText += text;
+          setStreamingContent(prev => prev + text);
+        }
+      }
+      
+      updateTask({ ...currentTask, description: fullText });
+    } catch (error) {
+      setStreamingContent("AI 休息中...请稍后再试 😴");
+    } finally {
+      setAiStreaming(false);
+    }
+  };
+
+  const handleAIBreakdown = async () => {
+    if (!currentTask) return;
+    setAiStreaming(true);
+
+    try {
+      const prompt = `你是一个专业的项目管理助手。
+      请将任务 "${currentTask.title}" 拆解为 3-5 个具体的、简练的执行步骤。
+      
+      格式要求：
+      1. 必须是纯文本，严禁包含 **粗体** 或 *斜体* 等 Markdown 符号。
+      2. 每一行写一个步骤。
+      3. 去掉所有序号（如 1. 2.），直接返回步骤内容。
+      4. 不要包含任何解释性文字，不要前言，不要总结。
+      5. 确保每个步骤都是可执行的动作。`;
+
+      const response = await ai.models.generateContentStream({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+
+      let fullText = "";
+      for await (const chunk of response) {
+        const text = chunk.text;
+        if (text) fullText += text;
+      }
+
+      const lines = fullText.split('\n').filter(line => line.trim().length > 0);
+      const newSubtasks: Subtask[] = lines.map((line, index) => ({
+        id: `st-${Date.now()}-${index}`,
+        title: line.replace(/(\*\*|__|\*|_)/g, '').replace(/^[\d\.\-\•\s]+/, '').trim(),
+        completed: false
+      }));
+
+      updateTask({ ...currentTask, subtasks: [...currentTask.subtasks, ...newSubtasks] });
+
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setAiStreaming(false);
+    }
+  };
+
+  // --- AI Project Chat ---
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages, isChatOpen]);
+
+  const handleChatSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!chatInput.trim() || chatStreaming) return;
+
+    const userMsg: ChatMessage = { id: Date.now().toString(), role: 'user', text: chatInput };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatInput("");
+    setChatStreaming(true);
+
+    const tempId = (Date.now() + 1).toString();
+    setChatMessages(prev => [...prev, { id: tempId, role: 'model', text: '' }]);
+
+    try {
+      // Define Tools
+      const createTaskTool: FunctionDeclaration = {
+        name: "createTask",
+        description: "Create a new task in the project management system. Use this when the user asks to add, create, or remind them of a task. If the user asks for multiple tasks, call this tool multiple times.",
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                title: { type: Type.STRING, description: "The short title of the task" },
+                description: { type: Type.STRING, description: "Full description of the task" },
+                priority: { type: Type.STRING, enum: ["Low", "Medium", "High"], description: "Priority level. Default to Medium if not specified." },
+                dueDate: { type: Type.STRING, description: "Due date in YYYY-MM-DD format" }
+            },
+            required: ["title"]
+        }
+      };
+
+      const today = new Date().toISOString().split('T')[0];
+      
+      const projectContext = JSON.stringify(tasks.map(t => ({
+        id: t.id,
+        title: t.title,
+        status: STATUS_LABELS[t.status],
+        priority: PRIORITY_LABELS[t.priority],
+        dueDate: t.dueDate,
+        tags: t.tags
+      })));
+
+      const systemInstruction = `
+      You are a cheerful, cute, and helpful project assistant in a pastel-themed app.
+      Current Date: ${today}
+      Current Project State: ${projectContext}
+      
+      Context Memory:
+      - Remember the user's previous requests from the conversation history.
+      - If the user refers to "those tasks" or "the task I just added", look at the project state or history.
+      - Always answer in Chinese. Use emojis occasionally.
+      `;
+
+      // Construct History for API
+      const historyContent = chatMessages.map(msg => ({
+          role: msg.role === 'model' ? 'model' : 'user',
+          parts: [{ text: msg.text }]
+      }));
+
+      const currentContent = { role: 'user', parts: [{ text: userMsg.text }] };
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [...historyContent, currentContent],
+        config: {
+            tools: [{ functionDeclarations: [createTaskTool] }],
+            systemInstruction: systemInstruction
+        }
+      });
+
+      const calls = response.functionCalls;
+
+      if (calls && calls.length > 0) {
+          // Handle Multiple Function Calls
+          const newTasksCreated: any[] = [];
+          
+          for (const call of calls) {
+              if (call.name === "createTask") {
+                  const args = call.args as any;
+                  const newTask = createAiTask(args);
+                  newTasksCreated.push(newTask);
+              }
+          }
+          
+          // Generate Follow-up Confirmation
+          const followUpPrompt = `
+          ${systemInstruction}
+          
+          SYSTEM NOTIFICATION:
+          The following tasks have JUST been successfully created in the system based on the user's request:
+          ${JSON.stringify(newTasksCreated.map(t => t.title))}
+          
+          INSTRUCTION:
+          Reply to the user confirming these specific tasks were created. Be enthusiastic!
+          `;
+          
+          const response2 = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [{ role: 'user', parts: [{ text: "Please confirm the tasks creation." }] }],
+            config: { systemInstruction: followUpPrompt }
+          });
+          
+          setChatMessages(prev => prev.map(msg => 
+            msg.id === tempId ? { ...msg, text: response2.text || "✅ 任务已创建！" } : msg
+          ));
+
+      } else {
+          // Normal chat response
+          setChatMessages(prev => prev.map(msg => 
+            msg.id === tempId ? { ...msg, text: response.text || "抱歉，我没有听懂..." } : msg
+          ));
+      }
+
+    } catch (error) {
+      console.error(error);
+      setChatMessages(prev => prev.map(msg => 
+        msg.id === tempId ? { ...msg, text: "哎呀，我好像断片了 😵‍💫 (API Error)" } : msg
+      ));
+    } finally {
+      setChatStreaming(false);
+    }
+  };
+
+  // --- Render Helpers ---
+
+  // Filter and Sort Tasks
+  const processedTasks = useMemo(() => {
+    let result = tasks.filter(t => 
+        t.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+        t.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        t.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+
+    if (sortMode === 'priority') {
+        const priorityWeight = { High: 3, Medium: 2, Low: 1 };
+        result.sort((a, b) => priorityWeight[b.priority] - priorityWeight[a.priority]);
+    } else if (sortMode === 'date') {
+        result.sort((a, b) => {
+            if (!a.dueDate) return 1;
+            if (!b.dueDate) return -1;
+            return a.dueDate.localeCompare(b.dueDate);
+        });
+    }
+    return result;
+  }, [tasks, searchQuery, sortMode]);
+
+
+  const Column = ({ status }: { status: Status }) => {
+    const columnTasks = processedTasks.filter(t => t.status === status);
+    const borderColor = status === 'To Do' ? 'border-rose-200' : status === 'In Progress' ? 'border-amber-200' : 'border-emerald-200';
+    const headerColor = status === 'To Do' ? 'text-rose-600' : status === 'In Progress' ? 'text-amber-600' : 'text-emerald-600';
+    const bgTint = status === 'To Do' ? 'bg-rose-50/50' : status === 'In Progress' ? 'bg-amber-50/50' : 'bg-emerald-50/50';
+
+    return (
+      <div 
+        className={`
+            flex flex-col 
+            md:h-full h-auto min-h-[200px] 
+            rounded-3xl p-4 glass transition-colors border-2 ${borderColor} ${bgTint} flex-shrink-0
+        `}
+        onDragOver={handleDragOver}
+        onDrop={(e) => handleDrop(e, status)}
+      >
+        <div className="flex items-center justify-between mb-5 px-1">
+          <div className="flex items-center gap-2">
+            <h2 className={`font-bold ${headerColor} text-sm uppercase tracking-wide`}>{STATUS_LABELS[status]}</h2>
+            <span className="bg-white/80 text-stone-500 text-xs px-2.5 py-0.5 rounded-full font-bold shadow-sm border border-white">
+              {columnTasks.length}
+            </span>
+          </div>
+          <button 
+            onClick={() => addNewTask(status)}
+            className="text-stone-400 hover:text-stone-600 hover:bg-white/60 p-1.5 rounded-full transition-all active:scale-95"
+          >
+            <PlusIcon className="w-5 h-5" />
+          </button>
+        </div>
+        
+        {/* Task List: Mobile = auto height, visible overflow. Desktop = flex-1, scrollable. */}
+        <div className="md:flex-1 md:overflow-y-auto overflow-visible space-y-3.5 custom-scrollbar pb-4 pr-1 h-auto">
+          {columnTasks.map(task => (
+            <div
+              key={task.id}
+              draggable
+              onDragStart={(e) => handleDragStart(e, task.id)}
+              onClick={() => openTaskDetail(task)}
+              className={`
+                hover-lift
+                group bg-white/90 p-4 rounded-2xl border border-white/60 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)] cursor-grab active:cursor-grabbing 
+                hover:border-rose-200 transition-all duration-300 relative overflow-hidden
+                ${draggedTaskId === task.id ? 'opacity-40 rotate-3 scale-95 grayscale' : ''}
+              `}
+            >
+              <div className="absolute -top-10 -right-10 w-20 h-20 bg-gradient-to-br from-rose-100 to-amber-100 rounded-full blur-xl opacity-0 group-hover:opacity-50 transition-opacity duration-500"></div>
+
+              <div className="flex justify-between items-start mb-2.5 relative z-10">
+                 <PriorityBadge priority={task.priority} />
+                <div className="opacity-0 group-hover:opacity-100 transition-opacity text-stone-300">
+                  <GripVerticalIcon className="w-4 h-4" />
+                </div>
+              </div>
+              
+              <h3 className="font-bold text-stone-700 mb-2.5 line-clamp-2 leading-snug relative z-10">{task.title}</h3>
+              
+              {task.tags && task.tags.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-3 relative z-10">
+                  {task.tags.map(tag => (
+                    <TagPill key={tag} text={tag} />
+                  ))}
+                </div>
+              )}
+
+              <div className="flex items-center justify-between mt-3 pt-3 border-t border-stone-100 relative z-10">
+                <div className="flex items-center gap-2">
+                   {task.dueDate && (
+                     <div className="flex items-center gap-1 text-[11px] text-rose-400 font-semibold bg-rose-50 px-2 py-1 rounded-md">
+                        <CalendarIcon className="w-3 h-3" />
+                        <span>{new Date(task.dueDate).toLocaleDateString('zh-CN', {month: 'numeric', day: 'numeric'})}</span>
+                     </div>
+                   )}
+                   {task.storyPoints && (
+                      <div className="flex items-center gap-1 text-[11px] text-amber-500 font-semibold bg-amber-50 px-2 py-1 rounded-md">
+                        <span>{task.storyPoints} 点</span>
+                      </div>
+                   )}
+                </div>
+
+                {task.subtasks.length > 0 && (
+                  <div className="flex items-center gap-1 text-xs text-stone-400 font-medium">
+                    <div className={`w-4 h-4 rounded-full flex items-center justify-center border transition-colors duration-300 ${task.subtasks.every(s => s.completed) ? 'bg-emerald-100 border-emerald-200 text-emerald-600' : 'bg-stone-100 border-stone-200'}`}>
+                       <CheckIcon className="w-2.5 h-2.5" />
+                    </div>
+                    <span>{task.subtasks.filter(s => s.completed).length}/{task.subtasks.length}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))}
+          {columnTasks.length === 0 && (
+            <div className="h-32 border-2 border-dashed border-stone-200/60 rounded-2xl flex flex-col items-center justify-center text-stone-400/80 text-sm gap-2 animate-in fade-in duration-500">
+              <div className="w-10 h-10 bg-white/50 rounded-full flex items-center justify-center shadow-sm">
+                 <PlusIcon className="w-5 h-5 text-stone-300" />
+              </div>
+              <span>添加新卡片</span>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="fixed inset-0 flex flex-col font-sans overflow-hidden bg-gradient-to-br from-rose-50 via-white to-amber-50">
+      {/* Header */}
+      <header className="glass-panel mx-4 md:mx-6 mt-4 mb-2 px-4 md:px-6 py-3.5 flex flex-col sm:flex-row items-center justify-between shrink-0 z-20 rounded-2xl shadow-sm transition-smooth gap-4 sm:gap-0">
+        <div className="flex items-center gap-6 w-full sm:w-auto justify-between sm:justify-start">
+           <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-gradient-to-br from-rose-400 to-amber-400 rounded-xl flex items-center justify-center text-white shadow-lg shadow-rose-200 transform rotate-3 hover:rotate-0 transition-transform duration-300 cursor-pointer">
+                <LayoutGridIcon className="w-6 h-6" />
+              </div>
+              <h1 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-rose-500 to-amber-500 hidden lg:block tracking-tight">
+                GeminiTask
+              </h1>
+           </div>
+
+           {/* View Switcher Tabs */}
+           <div className="flex bg-stone-100/50 p-1 rounded-xl border border-stone-200/50">
+               {[
+                   { id: 'board', label: '看板', icon: LayoutGridIcon },
+                   { id: 'timeline', label: '时间线', icon: ClockIcon },
+                   { id: 'insights', label: '洞察', icon: ChartPieIcon },
+               ].map((tab) => (
+                   <button
+                       key={tab.id}
+                       onClick={() => setViewMode(tab.id as ViewMode)}
+                       className={`
+                           flex items-center gap-1.5 px-3 md:px-4 py-1.5 rounded-lg text-xs font-bold transition-all
+                           ${viewMode === tab.id ? 'bg-white text-rose-600 shadow-sm' : 'text-stone-500 hover:text-stone-700 hover:bg-white/50'}
+                       `}
+                   >
+                       <tab.icon className="w-3.5 h-3.5" />
+                       <span className="hidden md:inline">{tab.label}</span>
+                       <span className="md:hidden">{tab.label.substring(0,2)}</span>
+                   </button>
+               ))}
+           </div>
+        </div>
+
+        {/* Drafts Button - Only Show in Board View */}
+        {viewMode === 'board' && (
+            <div className="relative">
+                <button 
+                    onClick={() => setShowDrafts(!showDrafts)}
+                    className="flex items-center gap-2 px-3 py-2 bg-white/80 hover:bg-white border border-stone-200 text-stone-600 text-xs font-bold rounded-xl transition-all shadow-sm group"
+                >
+                    <BellIcon className="w-4 h-4 text-rose-400 group-hover:animate-swing" />
+                    <span className="hidden sm:inline">3 条建议</span>
+                    <span className="w-2 h-2 bg-rose-500 rounded-full absolute top-2 right-2 animate-pulse"></span>
+                </button>
+                
+                {/* Mock Drafts Popover */}
+                {showDrafts && (
+                    <div className="absolute top-full right-0 mt-3 w-72 bg-white rounded-2xl shadow-xl border border-stone-100 p-4 z-50 animate-in slide-in-from-top-2">
+                        <h4 className="text-xs font-bold text-stone-400 uppercase tracking-wider mb-3">AI 发现的任务</h4>
+                        <div className="space-y-2">
+                            {[
+                                { t: "回复 Slack 关于 API 的讨论", time: "10:15 AM" },
+                                { t: "更新 README 文档", time: "昨天" },
+                                { t: "Review 登录页设计稿", time: "13:30 PM" }
+                            ].map((d, i) => (
+                                <div key={i} className="p-3 bg-stone-50 hover:bg-rose-50 rounded-xl border border-stone-100 hover:border-rose-100 transition-colors cursor-pointer group">
+                                    <div className="flex justify-between items-start">
+                                        <p className="text-sm font-bold text-stone-700 group-hover:text-rose-700">{d.t}</p>
+                                        <button className="text-stone-300 hover:text-emerald-500">
+                                            <PlusIcon className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                    <p className="text-[10px] text-stone-400 mt-1">来源: Screenpipe • {d.time}</p>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+        )}
+
+        <div className="flex items-center gap-3 hidden sm:flex">
+          {viewMode === 'board' && (
+              <div className="relative group">
+                <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-400 group-focus-within:text-rose-500 transition-colors" />
+                <input 
+                    type="text"
+                    placeholder="搜索..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-40 bg-white border border-stone-200 rounded-xl py-2 pl-9 pr-3 text-xs font-semibold focus:ring-2 focus:ring-rose-100 focus:border-rose-200 outline-none transition-all"
+                />
+              </div>
+          )}
+          <button 
+            onClick={() => setIsChatOpen(!isChatOpen)}
+            className={`
+              flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-sm hover-lift
+              ${isChatOpen 
+                ? 'bg-gradient-to-r from-rose-400 to-pink-500 text-white shadow-rose-200 ring-2 ring-rose-100' 
+                : 'bg-white text-stone-600 hover:bg-rose-50 hover:text-rose-600 border border-stone-100'}
+            `}
+          >
+            <SparklesIcon className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">AI 助手</span>
+          </button>
+        </div>
+      </header>
+
+      {/* Main Layout Switcher */}
+      <div className="flex-1 flex overflow-hidden relative w-full">
+        
+        <main className="flex-1 flex flex-col relative overflow-hidden w-full">
+            {viewMode === 'board' && (
+                <div className="flex-1 w-full overflow-x-hidden overflow-y-auto md:overflow-x-auto md:overflow-y-hidden p-4 md:p-6 pt-2 scroll-smooth">
+                    {/* 
+                        Mobile: grid-cols-1, h-auto (stacks vertically, outer container scrolls).
+                        Desktop: grid-cols-3, h-full (side-by-side, inner columns scroll).
+                    */}
+                    <div className="h-auto md:h-full w-full md:min-w-[1024px] grid grid-cols-1 md:grid-cols-3 gap-6 pb-24 md:pb-0">
+                        <Column status="To Do" />
+                        <Column status="In Progress" />
+                        <Column status="Done" />
+                    </div>
+                </div>
+            )}
+            
+            {viewMode === 'timeline' && <TimelineView />}
+            
+            {viewMode === 'insights' && <InsightsView onOpenRPGDetail={() => setIsRPGModalOpen(true)} />}
+        </main>
+
+        {/* Chat Sidebar */}
+        <aside 
+          className={`
+            fixed right-6 top-[88px] bottom-6 w-[calc(100%-48px)] sm:w-[400px] glass-panel rounded-3xl shadow-2xl transform transition-transform duration-500 cubic-bezier(0.16, 1, 0.3, 1) z-30 flex flex-col overflow-hidden border border-white/60
+            ${isChatOpen ? 'translate-x-0' : 'translate-x-[120%]'}
+          `}
+        >
+          <div className="p-4 border-b border-rose-100 bg-gradient-to-r from-rose-50/80 to-amber-50/80 flex justify-between items-center">
+             <h3 className="font-bold text-stone-700 flex items-center gap-2">
+               <div className="p-1.5 bg-white rounded-lg shadow-sm">
+                 <BotIcon className="w-5 h-5 text-rose-500" />
+               </div>
+               项目助理
+             </h3>
+             <button onClick={() => setIsChatOpen(false)} className="text-stone-400 hover:text-rose-500 bg-white/50 hover:bg-white p-1.5 rounded-lg transition-all">
+               <XIcon className="w-5 h-5" />
+             </button>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white/40">
+             {chatMessages.map((msg) => (
+               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                 <div 
+                    className={`
+                      max-w-[85%] p-3.5 rounded-2xl text-sm leading-relaxed shadow-sm backdrop-blur-sm
+                      ${msg.role === 'user' 
+                        ? 'bg-gradient-to-br from-rose-400 to-pink-500 text-white rounded-br-sm shadow-rose-200' 
+                        : 'bg-white/90 border border-white text-stone-700 rounded-bl-sm shadow-stone-100'}
+                    `}
+                 >
+                   {msg.text || <div className="flex gap-1 px-2 py-1"><span className="w-1.5 h-1.5 bg-rose-400 rounded-full animate-bounce"></span><span className="w-1.5 h-1.5 bg-rose-400 rounded-full animate-bounce delay-75"></span><span className="w-1.5 h-1.5 bg-rose-400 rounded-full animate-bounce delay-150"></span></div>}
+                 </div>
+               </div>
+             ))}
+             <div ref={chatEndRef} />
+          </div>
+
+          <div className="p-4 bg-white/60 border-t border-white backdrop-blur-md">
+            <form onSubmit={handleChatSubmit} className="relative group">
+              <input 
+                type="text" 
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="问我任何事情..."
+                disabled={chatStreaming}
+                className="w-full bg-white border border-stone-200/50 rounded-2xl py-3.5 pl-5 pr-12 text-sm focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all shadow-sm group-hover:shadow-md"
+              />
+              <button 
+                type="submit"
+                disabled={!chatInput.trim() || chatStreaming}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-rose-500 text-white rounded-xl hover:bg-rose-600 disabled:opacity-50 disabled:bg-stone-300 transition-all shadow-rose-200 hover:shadow-lg active:scale-95"
+              >
+                <SendIcon className="w-4 h-4" />
+              </button>
+            </form>
+            <div className="mt-3 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+              {["帮我建个任务 ✨", "进度总结 📊", "未完成任务? 🤔"].map(q => (
+                <button 
+                  key={q}
+                  onClick={() => { setChatInput(q); }}
+                  className="text-xs whitespace-nowrap px-3 py-1.5 bg-white border border-stone-100 text-stone-500 rounded-full hover:bg-rose-50 hover:text-rose-600 hover:border-rose-100 transition-all shadow-sm"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      {/* Task Detail Modal */}
+      <Modal isOpen={isModalOpen} onClose={closeModal}>
+        {currentTask && (
+          <div className="flex flex-col h-full">
+            {/* Modal Header */}
+            <div className="px-8 py-5 border-b border-stone-100 flex items-center justify-between bg-gradient-to-r from-white to-rose-50/30">
+              <div className="flex items-center gap-3">
+                <div className="relative">
+                    <select 
+                    value={currentTask.status}
+                    onChange={(e) => updateTask({ ...currentTask, status: e.target.value as Status })}
+                    className="appearance-none text-sm font-bold bg-white border border-stone-200 rounded-xl pl-4 pr-8 py-2 text-stone-700 focus:outline-none focus:ring-2 focus:ring-rose-200 shadow-sm cursor-pointer hover:border-rose-300 transition-colors"
+                    >
+                    <option value="To Do">待办</option>
+                    <option value="In Progress">进行中</option>
+                    <option value="Done">已完成</option>
+                    </select>
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-stone-400">
+                        <svg width="10" height="6" viewBox="0 0 10 6" fill="none"><path d="M1 1L5 5L9 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                    </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={() => deleteTask(currentTask.id)} className="text-stone-400 hover:text-rose-500 p-2 rounded-xl hover:bg-rose-50 transition-all" title="删除">
+                   <TrashIcon className="w-5 h-5" />
+                </button>
+                <button onClick={closeModal} className="text-stone-400 hover:text-stone-700 p-2 rounded-xl hover:bg-stone-100 transition-all">
+                  <XIcon className="w-6 h-6" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-8 space-y-6 bg-white/50">
+              
+              {/* Title Input */}
+              <div>
+                <input 
+                  type="text" 
+                  value={currentTask.title}
+                  onChange={(e) => updateTask({ ...currentTask, title: e.target.value })}
+                  placeholder="任务标题"
+                  className="w-full text-3xl font-black text-stone-800 placeholder:text-stone-300 border-none focus:outline-none focus:ring-0 bg-transparent px-0"
+                />
+              </div>
+
+              {/* Metadata Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+                 <div className="bg-white p-3 rounded-2xl border border-stone-100 shadow-sm">
+                    <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-1 block px-1">优先级</label>
+                    <select 
+                      value={currentTask.priority}
+                      onChange={(e) => updateTask({ ...currentTask, priority: e.target.value as Priority })}
+                      className="w-full text-sm font-semibold bg-transparent border-none p-1 text-stone-700 focus:ring-0 cursor-pointer"
+                    >
+                      <option value="Low">低</option>
+                      <option value="Medium">中</option>
+                      <option value="High">高</option>
+                    </select>
+                 </div>
+                 <div className="bg-white p-3 rounded-2xl border border-stone-100 shadow-sm">
+                    <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-1 block px-1">截止日期</label>
+                    <input 
+                      type="date"
+                      value={currentTask.dueDate || ''}
+                      onChange={(e) => updateTask({ ...currentTask, dueDate: e.target.value })}
+                      className="w-full text-sm font-semibold bg-transparent border-none p-1 text-stone-700 focus:ring-0" 
+                    />
+                 </div>
+                 <div className="bg-white p-3 rounded-2xl border border-stone-100 shadow-sm">
+                    <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-1 block px-1">故事点</label>
+                    <input 
+                      type="number"
+                      min="0"
+                      value={currentTask.storyPoints || 0}
+                      onChange={(e) => updateTask({ ...currentTask, storyPoints: parseInt(e.target.value) || 0 })}
+                      className="w-full text-sm font-semibold bg-transparent border-none p-1 text-stone-700 focus:ring-0" 
+                    />
+                 </div>
+              </div>
+
+              {/* Tags Section */}
+              <div className="bg-white p-3 rounded-2xl border border-stone-100 shadow-sm">
+                 <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-2 block px-1 flex items-center gap-1">
+                    <TagIcon className="w-3 h-3" /> 标签
+                 </label>
+                 <div className="flex flex-wrap gap-2">
+                    {currentTask.tags.map(tag => (
+                        <TagPill key={tag} text={tag} onRemove={() => removeTag(tag)} />
+                    ))}
+                    <input
+                        type="text"
+                        value={tagInput}
+                        onChange={(e) => setTagInput(e.target.value)}
+                        onKeyDown={handleAddTag}
+                        placeholder="+ 添加标签..."
+                        className="bg-transparent text-xs font-medium placeholder:text-stone-400 focus:outline-none min-w-[80px] py-1 px-1 text-stone-600"
+                    />
+                 </div>
+              </div>
+
+              {/* Description Section */}
+              <div className="group relative bg-white p-5 rounded-3xl border border-stone-100 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <label className="text-xs font-bold text-stone-400 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-rose-300"></span>
+                    任务描述
+                  </label>
+                  <button 
+                    onClick={handleAIPolish}
+                    disabled={aiStreaming || !currentTask.description}
+                    className="flex items-center gap-1.5 text-xs font-bold text-rose-500 hover:text-rose-600 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <SparklesIcon className="w-3.5 h-3.5" />
+                    {aiStreaming ? "润色中..." : "✨ AI 润色"}
+                  </button>
+                </div>
+                <div className="relative">
+                  <textarea 
+                    value={aiStreaming ? streamingContent : currentTask.description}
+                    onChange={(e) => updateTask({ ...currentTask, description: e.target.value })}
+                    placeholder="添加更详细的描述..."
+                    className={`w-full h-32 p-0 bg-transparent border-none text-stone-600 text-base leading-relaxed focus:outline-none focus:ring-0 resize-none ${aiStreaming ? 'animate-pulse text-rose-500' : ''}`}
+                  />
+                </div>
+              </div>
+
+              {/* Subtasks Section */}
+              <div className="bg-white p-5 rounded-3xl border border-stone-100 shadow-sm">
+                <div className="flex items-center justify-between mb-4">
+                  <label className="text-xs font-bold text-stone-400 uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-amber-300"></span>
+                    子任务
+                  </label>
+                  <button 
+                    onClick={handleAIBreakdown}
+                    disabled={aiStreaming}
+                    className="flex items-center gap-1.5 text-xs font-bold text-amber-600 hover:text-amber-700 bg-amber-50 hover:bg-amber-100 px-3 py-1.5 rounded-full transition-colors disabled:opacity-50"
+                  >
+                    <ListTodoIcon className="w-3.5 h-3.5" />
+                    📋 智能拆解
+                  </button>
+                </div>
+                
+                <div className="space-y-2">
+                  {currentTask.subtasks.map(subtask => (
+                    <div key={subtask.id} className="flex items-center gap-3 p-3 group hover:bg-stone-50 rounded-xl transition-colors border border-transparent hover:border-stone-100">
+                      <div 
+                        onClick={() => {
+                          const newSubtasks = currentTask.subtasks.map(s => 
+                            s.id === subtask.id ? { ...s, completed: !s.completed } : s
+                          );
+                          updateTask({ ...currentTask, subtasks: newSubtasks });
+                        }}
+                        className={`w-5 h-5 rounded-md border-2 flex items-center justify-center cursor-pointer transition-all ${subtask.completed ? 'bg-emerald-400 border-emerald-400' : 'border-stone-300 bg-white'}`}
+                      >
+                        {subtask.completed && <CheckIcon className="w-3.5 h-3.5 text-white" />}
+                      </div>
+                      
+                      <input
+                        type="text"
+                        value={subtask.title}
+                        onChange={(e) => {
+                          const newSubtasks = currentTask.subtasks.map(s => 
+                            s.id === subtask.id ? { ...s, title: e.target.value } : s
+                          );
+                          updateTask({ ...currentTask, subtasks: newSubtasks });
+                        }}
+                        className={`flex-1 bg-transparent border-none text-sm font-medium focus:ring-0 p-0 ${subtask.completed ? 'text-stone-400 line-through' : 'text-stone-700'}`}
+                      />
+                      <button 
+                        onClick={() => {
+                           const newSubtasks = currentTask.subtasks.filter(s => s.id !== subtask.id);
+                           updateTask({ ...currentTask, subtasks: newSubtasks });
+                        }}
+                        className="opacity-0 group-hover:opacity-100 text-stone-300 hover:text-rose-500 transition-all"
+                      >
+                        <XIcon className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  
+                  <button 
+                    onClick={() => {
+                       const newSubtask: Subtask = { id: `st-${Date.now()}`, title: "", completed: false };
+                       updateTask({ ...currentTask, subtasks: [...currentTask.subtasks, newSubtask] });
+                    }}
+                    className="flex items-center gap-2 text-sm text-stone-400 hover:text-rose-500 font-bold mt-3 px-3 py-2 rounded-xl hover:bg-rose-50 transition-all w-full border border-dashed border-stone-200 hover:border-rose-200"
+                  >
+                    <PlusIcon className="w-4 h-4" />
+                    添加子任务
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+const root = createRoot(document.getElementById("root")!);
+root.render(<App />);
