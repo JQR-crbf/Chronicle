@@ -16,7 +16,9 @@
 </div>
 
 ---
+## 项目介绍视频
 
+[【Chronicle，你的AI智能助手，帮你记录一天的电脑操作，智能分析潜在任务，周报日报再也不愁！-哔哩哔哩】 https://b23.tv/3N4zM4z]
 ## 📖 项目介绍
 
 **Screenpipe AI 任务管理助手** (原名 GeminiTask "Memory Core") 是一个智能的任务管理与工作分析平台。它集成了 **[Screenpipe](https://github.com/mediar-ai/screenpipe)**（开源屏幕/音频数据捕获工具）和 **Google Gemini AI**，旨在从"手动记录任务"进化为"自动感知工作"。
