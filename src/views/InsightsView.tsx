@@ -16,6 +16,7 @@ import { ReportSettingsModal, type ReportSettings } from '../components/modals/R
 import { ConfirmDialog } from '../components/modals/ConfirmDialog';
 import { PatInputModal } from '../components/modals/PatInputModal';
 import { PromptEditorModal } from '../components/modals/PromptEditorModal';
+import { ReportPathSettingsModal } from '../components/modals/ReportPathSettingsModal';
 import { saveReport, getReport, saveDailyStats, getDailyStats, migrateReportsFromLocalStorage } from '../utils/database';
 import type { TodayOverview, TimeDistribution, AppUsage, FocusPeriod, RPGStats } from '../utils/insightsAnalyzer';
 import type { TaskStats } from '../utils/taskAnalyzer';
@@ -300,6 +301,7 @@ export const InsightsView = ({ onOpenRPGDetail, ai, modelName }: InsightsViewPro
     const [editedLeaderContent, setEditedLeaderContent] = useState('');
     const [pushingDaily, setPushingDaily] = useState(false);
     const [showPatInput, setShowPatInput] = useState(false);
+    const [showPathSettings, setShowPathSettings] = useState(false);
     
     // 周报生成方式选择
     const [weeklyGenMethod, setWeeklyGenMethod] = useState<'from_daily' | 'from_raw'>('from_daily'); // 默认从日报生成
@@ -724,9 +726,10 @@ ${dailyReport}
     };
 
     // 确认推送（用户输入 PAT 后）- 只推送领导版
-    const handleConfirmPush = async (pat: string) => {
+    const handleConfirmPush = async (pat: string, memberId: string, teamDir: string) => {
         setShowPatInput(false);
         console.log('📤 [推送] 开始推送领导版日报...');
+        console.log('📤 [推送] 成员名称:', memberId, '团队目录:', teamDir);
         setPushingDaily(true);
         
         try {
@@ -734,7 +737,9 @@ ${dailyReport}
             const result = await invoke('push_daily_report', {
                 date: selectedDate,
                 content: leaderReport,
-                githubPat: pat
+                githubPat: pat,
+                memberId: memberId,
+                teamDir: teamDir
             });
             
             console.log('✅ [推送] 成功:', result);
@@ -2019,6 +2024,13 @@ ${JSON.stringify(summary, null, 2)}
                 isOpen={showPatInput}
                 onConfirm={handleConfirmPush}
                 onCancel={handleCancelPush}
+                onOpenPathSettings={() => setShowPathSettings(true)}
+            />
+
+            {/* 日报路径设置模态框 */}
+            <ReportPathSettingsModal
+                isOpen={showPathSettings}
+                onClose={() => setShowPathSettings(false)}
             />
 
             {/* 提示词编辑器 */}

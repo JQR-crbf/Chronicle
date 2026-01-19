@@ -35,8 +35,12 @@ def push_log(member_id, team_dir, date, content):
     return resp
 
 if __name__ == "__main__":
-    member_id = "金倩如"
-    team_dir = "中国团队 china-team"
+    # 从环境变量读取，如果没有则使用默认值
+    member_id = os.environ.get("MEMBER_ID", "金倩如")
+    team_dir = os.environ.get("TEAM_DIR", "中国团队 china-team")
+    
+    print(f"📋 成员名称: {member_id}")
+    print(f"🌏 团队目录: {team_dir}")
 
     today = datetime.date.today()
     date = today.strftime("%Y-%m-%d")

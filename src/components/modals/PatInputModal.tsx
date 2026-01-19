@@ -1,19 +1,48 @@
 import React, { useState, useEffect } from 'react';
 
-interface PatInputModalProps {
-    isOpen: boolean;
-    onConfirm: (pat: string) => void;
-    onCancel: () => void;
+// 声明 Tauri 全局类型
+declare global {
+    interface Window {
+        __TAURI__: any;
+    }
 }
 
-export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm, onCancel }) => {
+interface PatInputModalProps {
+    isOpen: boolean;
+    onConfirm: (pat: string, memberId: string, teamDir: string) => void;
+    onCancel: () => void;
+    onOpenPathSettings?: () => void;
+}
+
+export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm, onCancel, onOpenPathSettings }) => {
     const [pat, setPat] = useState('');
     const [showPat, setShowPat] = useState(false);
+    const [memberId, setMemberId] = useState('');
+    const [teamDir, setTeamDir] = useState('');
+    const [currentPath, setCurrentPath] = useState('~/Documents/Chronicle/日报');
 
     useEffect(() => {
         if (isOpen) {
             setPat('');
             setShowPat(false);
+            // 从 localStorage 读取上次的输入
+            const savedMemberId = localStorage.getItem('github_member_id') || '金倩如';
+            const savedTeamDir = localStorage.getItem('github_team_dir') || '中国团队 china-team';
+            setMemberId(savedMemberId);
+            setTeamDir(savedTeamDir);
+            
+            // 获取当前保存路径
+            if (window.__TAURI__) {
+                window.__TAURI__.invoke('get_current_report_dir')
+                    .then((path: string) => {
+                        // 简化路径显示
+                        const homePath = path.replace(/^\/Users\/[^\/]+/, '~');
+                        setCurrentPath(homePath);
+                    })
+                    .catch(() => {
+                        setCurrentPath('~/Documents/Chronicle/日报');
+                    });
+            }
         }
     }, [isOpen]);
 
@@ -21,8 +50,11 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (pat.trim()) {
-            onConfirm(pat.trim());
+        if (pat.trim() && memberId.trim() && teamDir.trim()) {
+            // 保存到 localStorage 以便下次使用
+            localStorage.setItem('github_member_id', memberId.trim());
+            localStorage.setItem('github_team_dir', teamDir.trim());
+            onConfirm(pat.trim(), memberId.trim(), teamDir.trim());
         }
     };
 
@@ -46,6 +78,29 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
                         推送日报到 AIEC Team Hub 需要 GitHub PAT。<br/>
                         您的 PAT 不会被保存，仅用于本次推送。
                     </p>
+                    
+                    {/* 显示当前保存路径 */}
+                    <div className="mt-4 p-3 bg-stone-50 rounded-xl border border-stone-200">
+                        <div className="flex items-center justify-between">
+                            <div className="flex-1">
+                                <div className="text-xs font-bold text-stone-600 mb-1">
+                                    📁 日报保存路径
+                                </div>
+                                <div className="text-xs text-stone-700 font-mono truncate">
+                                    {currentPath}
+                                </div>
+                            </div>
+                            {onOpenPathSettings && (
+                                <button
+                                    type="button"
+                                    onClick={onOpenPathSettings}
+                                    className="ml-3 px-3 py-1.5 text-xs font-bold text-blue-600 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+                                >
+                                    更改
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 </div>
 
                 <form onSubmit={handleSubmit}>
@@ -83,6 +138,38 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
                         </p>
                     </div>
 
+                    <div className="mb-6">
+                        <label className="block text-xs font-bold text-stone-600 mb-2">
+                            成员名称
+                        </label>
+                        <input
+                            type="text"
+                            value={memberId}
+                            onChange={(e) => setMemberId(e.target.value)}
+                            placeholder="例如：金倩如"
+                            className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 outline-none transition-all text-sm"
+                        />
+                        <p className="text-xs text-stone-400 mt-2">
+                            📁 用于生成 GitHub 路径中的成员目录名
+                        </p>
+                    </div>
+
+                    <div className="mb-6">
+                        <label className="block text-xs font-bold text-stone-600 mb-2">
+                            团队目录
+                        </label>
+                        <input
+                            type="text"
+                            value={teamDir}
+                            onChange={(e) => setTeamDir(e.target.value)}
+                            placeholder="例如：中国团队 china-team"
+                            className="w-full px-4 py-3 rounded-xl border border-stone-200 focus:border-violet-400 focus:ring-2 focus:ring-violet-100 outline-none transition-all text-sm"
+                        />
+                        <p className="text-xs text-stone-400 mt-2">
+                            🌏 用于生成 GitHub 路径中的团队目录名
+                        </p>
+                    </div>
+
                     <div className="flex gap-3">
                         <button
                             type="button"
@@ -93,7 +180,7 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
                         </button>
                         <button
                             type="submit"
-                            disabled={!pat.trim()}
+                            disabled={!pat.trim() || !memberId.trim() || !teamDir.trim()}
                             className="flex-1 px-6 py-3 rounded-xl bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 text-white font-bold text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             确认推送

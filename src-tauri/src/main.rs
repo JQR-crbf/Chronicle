@@ -3,7 +3,22 @@
 
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::process::Command;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct GitHubFileRequest {
+    message: String,
+    content: String,
+    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitHubFileResponse {
+    #[serde(default)]
+    sha: String,
+}
 
 #[tauri::command]
 fn clean_old_videos(days_old: u64) -> Result<String, String> {
@@ -61,15 +76,15 @@ fn clean_old_videos(days_old: u64) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn push_daily_report(date: String, content: String, github_pat: String) -> Result<String, String> {
-    // 获取用户主目录
-    let home_dir = dirs::home_dir().ok_or("无法获取用户主目录")?;
+fn push_daily_report(date: String, content: String, github_pat: String, member_id: String, team_dir: String) -> Result<String, String> {
+    // 使用用户配置的路径或默认路径
+    let report_dir = get_report_dir()?;
     
-    // 日报目录路径 - 使用 "日报" 目录
-    let report_dir = home_dir.join("Desktop").join("chronicle").join("日报");
-    
+    // 如果目录不存在，自动创建
     if !report_dir.exists() {
-        return Err(format!("日报目录不存在: {:?}", report_dir));
+        std::fs::create_dir_all(&report_dir)
+            .map_err(|e| format!("创建日报目录失败: {}", e))?;
+        println!("✅ 已创建日报目录: {:?}", report_dir);
     }
     
     // 1. 保存日报到本地文件（格式：YYYY.MM.DD.md）
@@ -81,59 +96,159 @@ fn push_daily_report(date: String, content: String, github_pat: String) -> Resul
     
     println!("✅ 日报已保存到: {:?}", report_file);
     
-    // 2. 调用 Python 脚本推送到 GitHub
-    let python_script = report_dir.join("push_my_log.py");
+    // 2. 使用 Rust 直接推送到 GitHub（无需 Python）
+    let repo = "AIEC-Team/AIEC-agent-hub";
+    let path = format!("成员日志 members/{}/{}/{}_log.md", team_dir, member_id, date);
+    let url = format!("https://api.github.com/repos/{}/contents/{}", repo, path);
     
-    if !python_script.exists() {
-        return Err(format!("推送脚本不存在: {:?}", python_script));
+    println!("📤 推送路径: {}", path);
+    
+    // 创建 HTTP 客户端
+    let client = reqwest::blocking::Client::new();
+    
+    // 检查文件是否已存在（获取 SHA）
+    let mut sha: Option<String> = None;
+    match client
+        .get(&url)
+        .header("Authorization", format!("token {}", github_pat))
+        .header("User-Agent", "Chronicle-App")
+        .send()
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                if let Ok(file_resp) = resp.json::<GitHubFileResponse>() {
+                    sha = Some(file_resp.sha);
+                    println!("📝 文件已存在，将更新（SHA: {}）", sha.as_ref().unwrap());
+                }
+            }
+        }
+        Err(e) => println!("ℹ️ 文件不存在，将创建新文件: {}", e),
     }
     
-    // 检查是否有虚拟环境
-    let venv_python = report_dir.join(".venv").join("bin").join("python3");
-    let python_cmd = if venv_python.exists() {
-        venv_python.to_str().unwrap()
-    } else {
-        "python3"
+    // Base64 编码内容
+    let content_base64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        content.as_bytes()
+    );
+    
+    // 构建请求体
+    let request_body = GitHubFileRequest {
+        message: format!("📝 [{}] Sync log for {}", member_id, date),
+        content: content_base64,
+        branch: "main".to_string(),
+        sha: sha,
     };
     
-    // 执行 Python 脚本，通过环境变量传递 PAT
-    let output = Command::new(python_cmd)
-        .arg(python_script.to_str().unwrap())
-        .current_dir(&report_dir)
-        .env("GITHUB_PAT_TEAM_HUB", github_pat)
-        .env("PYTHONIOENCODING", "utf-8")
-        .output()
-        .map_err(|e| format!("执行推送脚本失败: {}", e))?;
+    // 发送 PUT 请求
+    let response = client
+        .put(&url)
+        .header("Authorization", format!("token {}", github_pat))
+        .header("User-Agent", "Chronicle-App")
+        .json(&request_body)
+        .send()
+        .map_err(|e| format!("GitHub API 请求失败: {}", e))?;
     
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = response.status();
+    let response_text = response.text().unwrap_or_default();
     
-    if !output.status.success() {
-        return Err(format!(
-            "推送失败:\nstdout: {}\nstderr: {}",
-            stdout, stderr
-        ));
-    }
+    println!("📊 HTTP 状态: {}", status);
+    println!("📊 响应内容: {}", response_text);
     
-    println!("✅ Python 脚本输出:\n{}", stdout);
-    
-    // 检查输出中是否包含成功标志
-    if stdout.contains("上传成功") || stdout.contains("status: 200") || stdout.contains("status: 201") {
-        Ok(format!("日报推送成功！\n日期: {}\n文件: {:?}", date, report_file))
-    } else {
-        // 返回详细输出帮助调试
+    if status.is_success() {
         Ok(format!(
-            "推送完成（请检查结果）:\n{}\n{}",
-            stdout, stderr
+            "✅ 日报推送成功！\n\n日期: {}\n成员: {}\n团队: {}\n路径: {}\n本地文件: {:?}\n\nHTTP 状态: {}", 
+            date, member_id, team_dir, path, report_file, status
+        ))
+    } else {
+        Err(format!(
+            "❌ 推送失败\n\nHTTP 状态: {}\n响应: {}",
+            status, response_text
         ))
     }
+}
+
+// 获取日报保存路径（优先使用用户配置）
+fn get_report_dir() -> Result<std::path::PathBuf, String> {
+    // 从配置文件读取用户自定义路径
+    if let Some(config_dir) = dirs::config_dir() {
+        let config_file = config_dir.join("Chronicle").join("config.json");
+        if config_file.exists() {
+            if let Ok(config_content) = fs::read_to_string(&config_file) {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_content) {
+                    if let Some(custom_path) = config.get("report_dir").and_then(|v| v.as_str()) {
+                        let path = std::path::PathBuf::from(custom_path);
+                        if path.exists() || fs::create_dir_all(&path).is_ok() {
+                            println!("✅ 使用用户自定义路径: {:?}", path);
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // 使用默认路径
+    let report_dir = dirs::document_dir()
+        .ok_or("无法获取文档目录")?
+        .join("Chronicle")
+        .join("日报");
+    
+    Ok(report_dir)
+}
+
+// 保存日报路径配置
+#[tauri::command]
+fn set_report_dir(path: String) -> Result<String, String> {
+    let config_dir = dirs::config_dir()
+        .ok_or("无法获取配置目录")?
+        .join("Chronicle");
+    
+    fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("创建配置目录失败: {}", e))?;
+    
+    let config_file = config_dir.join("config.json");
+    let config = serde_json::json!({
+        "report_dir": path
+    });
+    
+    fs::write(&config_file, serde_json::to_string_pretty(&config).unwrap())
+        .map_err(|e| format!("保存配置失败: {}", e))?;
+    
+    Ok(format!("✅ 日报保存路径已设置为: {}", path))
+}
+
+// 获取当前日报路径
+#[tauri::command]
+fn get_current_report_dir() -> Result<String, String> {
+    let dir = get_report_dir()?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+// 打开目录选择对话框
+#[tauri::command]
+async fn select_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    
+    let result = app.dialog()
+        .file()
+        .set_title("选择日报保存目录")
+        .blocking_pick_folder();
+    
+    Ok(result.map(|path| path.to_string()))
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_sql::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![clean_old_videos, push_daily_report])
+        .plugin(tauri_plugin_dialog::init())  // 后端插件
+        .invoke_handler(tauri::generate_handler![
+            clean_old_videos, 
+            push_daily_report,
+            set_report_dir,
+            get_current_report_dir,
+            select_directory
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
