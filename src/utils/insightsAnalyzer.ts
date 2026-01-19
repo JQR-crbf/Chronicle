@@ -222,7 +222,23 @@ export function analyzeTodayEvents(events: ScreenpipeEvent[]) {
   // 4. 计算专注度（基于窗口切换频率）
   const uniqueApps = new Set(sortedEvents.map(e => e.appName));
   const switchCount = sortedEvents.length;
-  const focusScore = Math.min(100, Math.max(0, 100 - (switchCount / totalMinutes * 100)));
+  
+  // 计算每小时的切换次数，用更合理的公式
+  // 每小时切换少于10次 → 高专注度 (80-100分)
+  // 每小时切换10-30次 → 中等专注度 (50-80分)
+  // 每小时切换30次以上 → 低专注度 (0-50分)
+  let focusScore = 0;
+  if (totalMinutes > 0) {
+    const switchesPerHour = (switchCount / totalMinutes) * 60;
+    if (switchesPerHour < 10) {
+      focusScore = 100 - (switchesPerHour * 2); // 0-10次 → 100-80分
+    } else if (switchesPerHour < 30) {
+      focusScore = 80 - ((switchesPerHour - 10) * 1.5); // 10-30次 → 80-50分
+    } else {
+      focusScore = Math.max(0, 50 - ((switchesPerHour - 30) * 1)); // 30+次 → 50-0分
+    }
+    focusScore = Math.round(Math.min(100, Math.max(0, focusScore)));
+  }
 
   // 5. 专注时段分析 - 按小时分组
   const hourlyStats: HourlyStats[] = [];
