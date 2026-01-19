@@ -12,6 +12,7 @@ interface ColumnProps {
   draggedTaskId: string | null;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
   onAddTask: () => void;
   onTaskClick: (task: Task) => void;
   onDragStart: (e: React.DragEvent, taskId: string) => void;
@@ -58,6 +59,7 @@ export const Column = ({
   draggedTaskId,
   onDragOver,
   onDrop,
+  onDragEnd,
   onAddTask,
   onTaskClick,
   onDragStart
@@ -83,6 +85,17 @@ export const Column = ({
     { value: 'month', label: '本月' }
   ];
 
+  const handleDragOver = (e: React.DragEvent) => {
+    console.log(`📍 Column (${status}): dragover 事件触发！`);
+    e.preventDefault(); // ← 确保调用 preventDefault！
+    onDragOver(e);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    console.log(`📦 Column (${status}): drop 事件触发`);
+    onDrop(e);
+  };
+
   return (
     <div 
       className={`
@@ -90,8 +103,8 @@ export const Column = ({
           md:h-full h-auto min-h-[200px] 
           rounded-3xl p-4 glass transition-colors border-2 ${borderColor} ${bgTint} flex-shrink-0
       `}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
     >
       <div className="flex items-center justify-between mb-5 px-1">
         <div className="flex items-center gap-2">
@@ -132,13 +145,20 @@ export const Column = ({
       )}
       
       {/* Task List: Mobile = auto height, visible overflow. Desktop = flex-1, scrollable. */}
-      <div className="md:flex-1 md:overflow-y-auto overflow-visible space-y-3.5 custom-scrollbar pb-4 pr-1 h-auto">
+      <div 
+        className="md:flex-1 md:overflow-y-auto overflow-visible space-y-3.5 custom-scrollbar pb-4 pr-1 h-auto min-h-[120px]"
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
         {filteredTasks.map(task => (
           <TaskCard
             key={task.id}
             task={task}
             isDragging={draggedTaskId === task.id}
             onDragStart={(e) => onDragStart(e, task.id)}
+            onDragEnd={onDragEnd}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
             onClick={() => onTaskClick(task)}
           />
         ))}

@@ -27,3 +27,9 @@ dist-ssr
 src-tauri/target/
 target/
 **/*.rs.bk
+
+# Environment variables (API Keys)
+.env
+.env.local
+.env.production
+.env.development

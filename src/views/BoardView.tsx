@@ -8,6 +8,7 @@ interface BoardViewProps {
   onDragStart: (e: React.DragEvent, taskId: string) => void;
   onDragOver: (e: React.DragEvent) => void;
   onDrop: (e: React.DragEvent, targetStatus: Status) => void;
+  onDragEnd: () => void;
   onAddTask: (status: Status) => void;
   onTaskClick: (task: Task) => void;
 }
@@ -18,6 +19,7 @@ export const BoardView = ({
   onDragStart,
   onDragOver,
   onDrop,
+  onDragEnd,
   onAddTask,
   onTaskClick
 }: BoardViewProps) => {
@@ -38,6 +40,7 @@ export const BoardView = ({
                 draggedTaskId={draggedTaskId}
                 onDragOver={onDragOver}
                 onDrop={(e) => onDrop(e, status)}
+                onDragEnd={onDragEnd}
                 onAddTask={() => onAddTask(status)}
                 onTaskClick={onTaskClick}
                 onDragStart={onDragStart}

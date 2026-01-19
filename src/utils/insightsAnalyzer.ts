@@ -280,7 +280,7 @@ export function analyzeTodayEvents(events: ScreenpipeEvent[]) {
   const overview: TodayOverview = {
     workHours: parseFloat(workHours.toFixed(1)),
     deepWorkHours: parseFloat(deepWorkHours.toFixed(1)),
-    tasksCompleted: 0, // 需要从任务系统获取
+    tasksCompleted: 0, // 注意：这个值需要在调用处单独设置，从任务系统获取
     focusScore: Math.round(focusScore)
   };
 

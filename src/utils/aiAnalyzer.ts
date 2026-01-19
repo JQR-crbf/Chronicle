@@ -1,15 +1,15 @@
-import { GoogleGenAI } from '@google/genai';
-import { ScreenpipeEvent, AIAnalysis } from '../types';
+import { ScreenpipeEvent, AIAnalysis, AIClient } from '../types';
 
 // AI 分析存储的 localStorage key
 const AI_ANALYSIS_STORAGE_KEY = 'screenpipe_ai_analysis';
 
 /**
- * 使用 Gemini AI 分析 Screenpipe 事件内容
+ * 使用 AI 分析 Screenpipe 事件内容
  */
 export async function analyzeEventWithAI(
   event: ScreenpipeEvent,
-  ai: GoogleGenAI
+  ai: AIClient,
+  modelName: string
 ): Promise<AIAnalysis> {
   console.log('🔍 分析单个事件:', {
     id: event.id,
@@ -45,9 +45,9 @@ ${event.content}
 只返回 JSON，不要其他文字。
     `.trim();
 
-    console.log('📡 调用 Gemini API...');
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+    console.log('📡 调用 AI...');
+    const response = await ai.generateContent({
+      model: modelName,
       contents: prompt,
     });
 
@@ -91,7 +91,8 @@ ${event.content}
  */
 export async function analyzeEventsInBatch(
   events: ScreenpipeEvent[],
-  ai: GoogleGenAI,
+  ai: AIClient,
+  modelName: string,
   onProgress?: (current: number, total: number) => void
 ): Promise<Map<string, AIAnalysis>> {
   console.log('📦 开始批量分析:', { totalEvents: events.length });
@@ -119,7 +120,7 @@ export async function analyzeEventsInBatch(
 
     // 调用 AI 分析
     try {
-      const analysis = await analyzeEventWithAI(event, ai);
+      const analysis = await analyzeEventWithAI(event, ai, modelName);
       results.set(event.id, analysis);
       analyzed++;
       console.log(`✅ 第 ${i + 1} 条分析完成`);

@@ -10,9 +10,11 @@ interface TaskDetailModalProps {
   tagInput: string;
   aiStreaming: boolean;
   streamingContent: string;
+  relatedTasks?: Task[];
   onClose: () => void;
   onUpdateTask: (task: Task) => void;
   onDeleteTask: (taskId: string) => void;
+  onTaskClick?: (task: Task) => void;
   onTagInputChange: (value: string) => void;
   onAddTag: (e: React.KeyboardEvent) => void;
   onRemoveTag: (tag: string) => void;
@@ -26,9 +28,11 @@ export const TaskDetailModal = ({
   tagInput,
   aiStreaming,
   streamingContent,
+  relatedTasks = [],
   onClose,
   onUpdateTask,
   onDeleteTask,
+  onTaskClick,
   onTagInputChange,
   onAddTag,
   onRemoveTag,
@@ -242,6 +246,50 @@ export const TaskDetailModal = ({
               </button>
             </div>
           </div>
+
+          {/* 相关任务推荐 */}
+          {relatedTasks && relatedTasks.length > 0 && (
+            <div className="mt-6 pt-6 border-t border-stone-200">
+              <h3 className="text-sm font-bold text-stone-700 mb-3 flex items-center gap-2">
+                <span>✨</span>
+                相关任务
+              </h3>
+              <div className="space-y-2">
+                {relatedTasks.map((relatedTask) => (
+                  <button
+                    key={relatedTask.id}
+                    onClick={() => onTaskClick && onTaskClick(relatedTask)}
+                    className="w-full text-left px-3 py-2 rounded-lg bg-gradient-to-r from-purple-50 to-pink-50 hover:from-purple-100 hover:to-pink-100 border border-purple-200 transition-all group"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-stone-700 group-hover:text-purple-600 transition-colors truncate">
+                          {relatedTask.title}
+                        </div>
+                        {relatedTask.description && (
+                          <div className="text-xs text-stone-500 mt-1 line-clamp-1">
+                            {relatedTask.description}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-shrink-0">
+                        <span className={`text-xs px-2 py-1 rounded-full font-bold ${
+                          relatedTask.priority === 'High' ? 'bg-rose-100 text-rose-600' :
+                          relatedTask.priority === 'Medium' ? 'bg-amber-100 text-amber-600' :
+                          'bg-stone-100 text-stone-600'
+                        }`}>
+                          {relatedTask.priority}
+                        </span>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-stone-400 mt-3 text-center">
+                💡 基于 AI 语义分析推荐
+              </div>
+            </div>
+          )}
 
         </div>
       </div>

@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { GoogleGenAI } from '@google/genai';
+import { invoke } from '@tauri-apps/api/core';
 import { mockDailyReport, mockWeeklyReport } from '../constants';
 import { EyeIcon, FileTextIcon, ChartPieIcon, CopyIcon, SparklesIcon, ClockIcon, CalendarIcon } from '../components/icons';
 import { getEventsByDateRange } from '../utils/screenpipe';
@@ -10,19 +10,243 @@ import {
     getWeekEvents
 } from '../utils/insightsAnalyzer';
 import { analyzeTaskStats, convertToChartHeights } from '../utils/taskAnalyzer';
+import { storage } from '../utils/storage';
 import { filterEvents, type FilterStrategy } from '../utils/reportFilters';
 import { ReportSettingsModal, type ReportSettings } from '../components/modals/ReportSettingsModal';
 import { ConfirmDialog } from '../components/modals/ConfirmDialog';
+import { PatInputModal } from '../components/modals/PatInputModal';
+import { PromptEditorModal } from '../components/modals/PromptEditorModal';
+import { saveReport, getReport, saveDailyStats, getDailyStats, migrateReportsFromLocalStorage } from '../utils/database';
 import type { TodayOverview, TimeDistribution, AppUsage, FocusPeriod, RPGStats } from '../utils/insightsAnalyzer';
 import type { TaskStats } from '../utils/taskAnalyzer';
-import type { ScreenpipeEvent } from '../types';
+import type { ScreenpipeEvent, AIClient } from '../types';
 
 interface InsightsViewProps {
   onOpenRPGDetail: () => void;
+  ai: AIClient | null;
+  modelName: string;
 }
 
-export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
-    const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY }), []);
+// ==================== 默认提示词定义 ====================
+
+const DEFAULT_PROMPTS = {
+  daily_detailed: `你是一名资深的工作效率顾问和技术文档专家，负责为高级工程师编写专业、详实的工作日报。
+
+## 任务要求
+
+根据以下数据为 {date} 生成一份**详细、专业、数据驱动**的工作日报。
+
+## 日报格式要求
+
+### 结构（使用 Markdown）
+
+\`\`\`markdown
+# 📅 工作日报 - {date}
+
+## 📊 工作概览
+- **总工作时长**：X.X 小时
+- **深度工作时长**：X.X 小时
+- **专注度评分**：XX/100
+- **完成任务**：X 个
+
+## 🚀 核心工作内容
+
+### 1. [项目/模块名称]
+**工作内容：**
+- 详细描述具体完成的工作（至少3-5条）
+- 包含技术细节和实现方式
+- 注明完成时间段
+
+**技术亮点：**
+- 使用的关键技术或工具
+- 解决的技术难点
+
+**产出成果：**
+- 具体的交付物或成果
+
+### 2. [项目/模块名称]（如有多个项目）
+（同上格式）
+
+## 💬 沟通与协作
+
+### 会议记录
+- **[时间段]** [会议主题] - 讨论要点、决策事项
+
+### 技术交流
+- 具体的沟通内容和解决的问题
+
+## 📚 学习与调研
+
+### 技术调研
+- 调研的技术点或问题
+- 查阅的文档和资料
+- 得出的结论或方案
+
+### 知识积累
+- 学习到的新知识或技能
+
+## 📈 数据分析
+
+### 效率分析
+- 深度工作占比达到 X%，说明...
+- 专注度评分 XX 分，表明...
+- 工具使用情况分析...
+
+### 时间分布
+- 上午/下午的工作重点
+- 高效时段分析
+
+## ⚡ 今日亮点
+1. 最重要的成果或突破
+2. 值得记录的技术实践
+3. 高效的工作方法
+
+## 📝 明日计划
+1. 待完成的重点任务
+2. 需要跟进的事项
+3. 计划调研的技术点
+
+---
+*报告生成时间：${new Date().toLocaleString('zh-CN')}*
+\`\`\`
+
+## 内容要求
+
+1. **详细度**：
+   - 每个工作项至少写 3-5 条具体内容
+   - 总字数 800-1200 字
+   - 包含具体的时间、数据、工具名称
+
+2. **专业性**：
+   - 使用准确的技术术语
+   - 体现工程师的技术深度
+   - 数据驱动的分析
+
+3. **结构化**：
+   - 清晰的层级结构
+   - 合理的分类归纳
+   - 逻辑连贯
+
+4. **智能过滤**：
+   - 自动过滤娱乐、摸鱼内容
+   - 只保留工作相关的活动
+   - 合理归类和总结
+
+5. **数据呈现**：
+   - 充分利用统计数据
+   - 用数据支撑结论
+   - 量化工作成果
+
+6. **实用价值**：
+   - 可作为工作记录
+   - 便于团队汇报
+   - 方便日后回顾
+
+## 注意事项
+
+- 从活动日志中**智能提取**工作内容，不要简单罗列
+- **推理项目名称**和模块名称（基于窗口标题和活动内容）
+- **归纳总结**而非流水账
+- 即使数据不完整，也要生成完整的日报结构
+- 专业、客观、数据驱动`,
+
+  daily_leader: `根据用户 {date} 的工作记录，生成一份结构化的工作日报。
+
+## 要求
+
+1. 使用 Markdown 格式
+2. 包含以下部分：
+   - 📅 日报 ({date})
+   - 🚀 开发进度
+   - 💬 沟通与会议
+   - 📚 调研
+3. 过滤掉娱乐和摸鱼内容
+4. 突出重要成果和数据
+5. 语言专业
+6. 一共 800 字左右
+7. 不要包含具体时间信息`,
+
+  weekly_from_daily: `你是一个专业的工作周报生成助手。
+
+根据用户本周每天的日报，生成一份结构化的工作周报。
+
+要求：
+1. 使用 Markdown 格式
+2. 包含以下部分：
+   - 🗓️ 周报 ({weekStart} ~ {weekEnd})
+   - 🌟 本周亮点（综合本周最重要的成果）
+   - 📊 数据统计（如果日报中有数据，进行汇总）
+   - 🚧 改进建议（基于每天的工作情况提出改进方向）
+   - 📈 下周计划（基于本周工作进展提出合理计划）
+3. 汇总提炼，不要简单复制日报内容
+4. 突出重点和趋势
+5. 语言简洁专业
+6. 全文 1200-1500 字
+
+本周日报内容：
+{dailyReportsText}`,
+
+  weekly_from_raw: `你是一个专业的工作周报生成助手。
+
+根据用户本周的屏幕活动数据，生成一份结构化的工作周报。
+
+要求：
+1. 使用 Markdown 格式
+2. 包含以下部分：
+   - 🗓️ 周报 ({weekStart} ~ {weekEnd})
+   - 🌟 本周亮点
+   - 📊 数据统计
+   - 🚧 改进建议
+   - 📈 下周计划
+3. 基于数据提供洞察，而不是简单罗列
+4. 语言简洁专业
+
+本周统计数据：
+- 总工作时长：{workHours} 小时
+- 深度工作时长：{deepWorkHours} 小时
+- 专注度评分：{focusScore}
+- 深度工作占比：{deepWorkPercent}%
+- 会议沟通占比：{communicationPercent}%
+- 主要应用：{topApps}
+
+每日概况：
+{dailySummary}`
+};
+
+// 从 localStorage 读取自定义提示词
+const getCustomPrompts = (): Partial<typeof DEFAULT_PROMPTS> => {
+  try {
+    const saved = localStorage.getItem('customPrompts');
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('读取自定义提示词失败:', e);
+  }
+  return {};
+};
+
+// 保存自定义提示词到 localStorage
+const saveCustomPrompt = (type: keyof typeof DEFAULT_PROMPTS, prompt: string) => {
+  try {
+    const customPrompts = getCustomPrompts();
+    customPrompts[type] = prompt;
+    localStorage.setItem('customPrompts', JSON.stringify(customPrompts));
+    console.log(`✅ 已保存自定义提示词: ${type}`);
+  } catch (e) {
+    console.error('保存自定义提示词失败:', e);
+  }
+};
+
+// 获取当前使用的提示词（自定义或默认）
+const getCurrentPrompt = (type: keyof typeof DEFAULT_PROMPTS): string => {
+  const customPrompts = getCustomPrompts();
+  return customPrompts[type] || DEFAULT_PROMPTS[type];
+};
+
+// ==================== 组件开始 ====================
+
+export const InsightsView = ({ onOpenRPGDetail, ai, modelName }: InsightsViewProps) => {
     
     // 数据状态
     const [selectedDate, setSelectedDate] = useState<string>(new Date().toISOString().split('T')[0]);
@@ -59,26 +283,35 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
     });
     
     const [loading, setLoading] = useState(true);
-    const [dailyReport, setDailyReport] = useState(() => {
-        // 优先从 localStorage 读取保存的日报
-        const saved = localStorage.getItem(`dailyReport_${selectedDate}`);
-        return saved || mockDailyReport;
-    });
-    const [weeklyReport, setWeeklyReport] = useState(() => {
-        // 优先从 localStorage 读取保存的周报
-        const today = new Date();
-        const weekStart = new Date(today);
-        weekStart.setDate(today.getDate() - (today.getDay() === 0 ? 6 : today.getDay() - 1));
-        const weekKey = weekStart.toISOString().split('T')[0];
-        const saved = localStorage.getItem(`weeklyReport_${weekKey}`);
-        return saved || mockWeeklyReport;
-    });
+    const [dailyReport, setDailyReport] = useState(mockDailyReport);
+    const [leaderReport, setLeaderReport] = useState(''); // 领导版日报
+    const [currentVersion, setCurrentVersion] = useState<'self' | 'leader'>('self'); // 当前查看的版本
+    const [weeklyReport, setWeeklyReport] = useState(mockWeeklyReport);
     const [generatingDaily, setGeneratingDaily] = useState(false);
+    const [generatingLeader, setGeneratingLeader] = useState(false); // 生成领导版状态
     const [generatingWeekly, setGeneratingWeekly] = useState(false);
     const [copiedDaily, setCopiedDaily] = useState(false);
     const [copiedWeekly, setCopiedWeekly] = useState(false);
     const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false);
     const [pendingReport, setPendingReport] = useState<{ type: 'daily' | 'weekly', content: string } | null>(null);
+    const [editingDaily, setEditingDaily] = useState(false);
+    const [editedDailyContent, setEditedDailyContent] = useState('');
+    const [editingLeader, setEditingLeader] = useState(false);
+    const [editedLeaderContent, setEditedLeaderContent] = useState('');
+    const [pushingDaily, setPushingDaily] = useState(false);
+    const [showPatInput, setShowPatInput] = useState(false);
+    
+    // 周报生成方式选择
+    const [weeklyGenMethod, setWeeklyGenMethod] = useState<'from_daily' | 'from_raw'>('from_daily'); // 默认从日报生成
+    const [weeklyDailyVersion, setWeeklyDailyVersion] = useState<'detailed' | 'leader'>('detailed'); // 使用哪个版本的日报
+    
+    // 提示词编辑器状态
+    const [showPromptEditor, setShowPromptEditor] = useState(false);
+    const [editingPromptType, setEditingPromptType] = useState<'daily_detailed' | 'daily_leader' | 'weekly_from_daily' | 'weekly_from_raw'>('daily_detailed');
+    
+    // AI 深度分析建议
+    const [aiInsight, setAiInsight] = useState<string>('');
+    const [generatingInsight, setGeneratingInsight] = useState(false);
     
     // 报告设置
     const [showSettings, setShowSettings] = useState(false);
@@ -112,23 +345,55 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
         return Array.from(apps).sort();
     }, [todayEvents]);
 
+    // 初始化时迁移 localStorage 数据
+    useEffect(() => {
+        migrateReportsFromLocalStorage();
+    }, []);
+
     // 加载数据
     useEffect(() => {
-        loadDailyData(selectedDate);
+        const loadData = async () => {
+            // 加载每日统计数据
+            await loadDailyData(selectedDate);
+            
+            // 加载该日期的日报（详细版）
+            const savedDaily = await getReport('daily', selectedDate);
+            if (savedDaily) {
+                setDailyReport(savedDaily);
+                console.log('📖 [日报-详细版] 从数据库加载:', selectedDate);
+            } else {
+                setDailyReport(mockDailyReport);
+            }
+            
+            // 加载该日期的领导版日报
+            const savedLeader = await getReport('daily_leader' as any, selectedDate);
+            if (savedLeader) {
+                setLeaderReport(savedLeader);
+                console.log('📖 [日报-领导版] 从数据库加载:', selectedDate);
+            } else {
+                setLeaderReport('');
+            }
+            
+            // 加载本周的周报
+            const today = new Date();
+            const weekStart = new Date(today);
+            weekStart.setDate(today.getDate() - (today.getDay() === 0 ? 6 : today.getDay() - 1));
+            const weekKey = weekStart.toISOString().split('T')[0];
+            const savedWeekly = await getReport('weekly', weekKey);
+            if (savedWeekly) {
+                setWeeklyReport(savedWeekly);
+                console.log('📖 [周报] 从数据库加载:', weekKey);
+            } else {
+                setWeeklyReport(mockWeeklyReport);
+            }
+        };
         
-        // 加载该日期的日报（如果有）
-        const savedDaily = localStorage.getItem(`dailyReport_${selectedDate}`);
-        if (savedDaily) {
-            setDailyReport(savedDaily);
-            console.log('📖 [日报] 从 localStorage 加载:', selectedDate);
-        } else {
-            setDailyReport(mockDailyReport);
-        }
+        loadData();
         
         // 如果是今天，每5分钟刷新一次
         const todayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
         if (selectedDate === todayStr) {
-            const interval = setInterval(() => loadDailyData(selectedDate), 5 * 60 * 1000);
+            const interval = setInterval(() => loadData(), 5 * 60 * 1000);
             return () => clearInterval(interval);
         }
     }, [selectedDate]);
@@ -140,46 +405,50 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
         console.log('💾 [设置] 已保存:', settings);
     };
 
-    // 保存日报到 localStorage
-    const saveDailyReport = (content: string, date: string) => {
-        localStorage.setItem(`dailyReport_${date}`, content);
-        console.log('💾 [日报] 已保存到 localStorage:', date);
+    // 保存日报到数据库
+    const saveDailyReportToDB = async (content: string, date: string) => {
+        const success = await saveReport('daily', date, content);
+        if (success) {
+            console.log('💾 [日报] 已保存到数据库:', date);
+        }
     };
 
-    // 保存周报到 localStorage
-    const saveWeeklyReport = (content: string) => {
+    // 保存周报到数据库
+    const saveWeeklyReportToDB = async (content: string) => {
         const today = new Date();
         const weekStart = new Date(today);
         weekStart.setDate(today.getDate() - (today.getDay() === 0 ? 6 : today.getDay() - 1));
         const weekKey = weekStart.toISOString().split('T')[0];
-        localStorage.setItem(`weeklyReport_${weekKey}`, content);
-        console.log('💾 [周报] 已保存到 localStorage:', weekKey);
+        const success = await saveReport('weekly', weekKey, content);
+        if (success) {
+            console.log('💾 [周报] 已保存到数据库:', weekKey);
+        }
     };
 
     // 检查是否有已保存的报告
-    const hasExistingDailyReport = (date: string): boolean => {
-        const saved = localStorage.getItem(`dailyReport_${date}`);
+    const hasExistingDailyReport = async (date: string): Promise<boolean> => {
+        const saved = await getReport('daily', date);
         return !!(saved && saved !== mockDailyReport);
     };
 
-    const hasExistingWeeklyReport = (): boolean => {
+    const hasExistingWeeklyReport = async (): Promise<boolean> => {
         const today = new Date();
         const weekStart = new Date(today);
         weekStart.setDate(today.getDate() - (today.getDay() === 0 ? 6 : today.getDay() - 1));
         const weekKey = weekStart.toISOString().split('T')[0];
-        const saved = localStorage.getItem(`weeklyReport_${weekKey}`);
+        const saved = await getReport('weekly', weekKey);
         return !!(saved && saved !== mockWeeklyReport);
     };
 
     // 确认覆盖
-    const handleConfirmOverwrite = (confirm: boolean) => {
+    const handleConfirmOverwrite = async (confirm: boolean) => {
         if (confirm && pendingReport) {
             if (pendingReport.type === 'daily') {
                 setDailyReport(pendingReport.content);
-                saveDailyReport(pendingReport.content, selectedDate);
+                await saveDailyReportToDB(pendingReport.content, selectedDate);
             } else {
                 setWeeklyReport(pendingReport.content);
-                saveWeeklyReport(pendingReport.content);
+                await saveWeeklyReportToDB(pendingReport.content);
             }
         }
         setShowOverwriteConfirm(false);
@@ -189,13 +458,78 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
     const loadDailyData = async (date: string) => {
         try {
             setLoading(true);
+            
+            // 首先尝试从数据库加载缓存的统计数据
+            const cachedStats = await getDailyStats(date);
+            
+            if (cachedStats) {
+                console.log('📊 [统计] 从数据库加载缓存数据:', date);
+                
+                // 即使有缓存，也重新计算任务完成数（因为任务状态可能变化）
+                let currentTasksCompleted = cachedStats.tasksCompleted;
+                try {
+                    const allTasks = await storage.getTasks();
+                    const dateStart = new Date(date);
+                    dateStart.setHours(0, 0, 0, 0);
+                    const dateEnd = new Date(date);
+                    dateEnd.setHours(23, 59, 59, 999);
+                    
+                    currentTasksCompleted = allTasks.filter(task => {
+                        if (task.status !== 'Done' || !task.completedAt) return false;
+                        const completedDate = new Date(task.completedAt);
+                        return completedDate >= dateStart && completedDate <= dateEnd;
+                    }).length;
+                } catch (error) {
+                    console.error('❌ 更新任务完成数失败:', error);
+                }
+                
+                setOverview({
+                    workHours: cachedStats.workHours,
+                    deepWorkHours: cachedStats.deepWorkHours,
+                    tasksCompleted: currentTasksCompleted, // 使用最新的任务完成数
+                    focusScore: cachedStats.focusScore
+                });
+                setTimeDistribution(cachedStats.timeDistribution);
+                setAppUsage(cachedStats.appUsage);
+                setFocusPeriods(cachedStats.focusPeriods);
+                setRpgStats(cachedStats.rpgStats);
+            }
+            
             // 使用 getEventsByDateRange 获取指定日期全天的数据
             const events = await getEventsByDateRange(date);
             setTodayEvents(events);
             
+            // 获取该日期完成的任务数
+            let tasksCompletedOnDate = 0;
+            try {
+                const allTasks = await storage.getTasks();
+                // 计算指定日期完成的任务数
+                const dateStart = new Date(date);
+                dateStart.setHours(0, 0, 0, 0);
+                const dateEnd = new Date(date);
+                dateEnd.setHours(23, 59, 59, 999);
+                
+                tasksCompletedOnDate = allTasks.filter(task => {
+                    if (task.status !== 'Done' || !task.completedAt) return false;
+                    const completedDate = new Date(task.completedAt);
+                    return completedDate >= dateStart && completedDate <= dateEnd;
+                }).length;
+                
+                console.log(`📊 [统计] ${date} 完成任务数: ${tasksCompletedOnDate}`);
+            } catch (error) {
+                console.error('❌ 获取任务完成数失败:', error);
+            }
+            
             if (events.length > 0) {
                 const analysis = analyzeTodayEvents(events);
-                setOverview(analysis.overview);
+                
+                // 使用真实的任务完成数替换硬编码的0
+                const overviewWithTasks = {
+                    ...analysis.overview,
+                    tasksCompleted: tasksCompletedOnDate
+                };
+                
+                setOverview(overviewWithTasks);
                 setTimeDistribution(analysis.timeDistribution);
                 setAppUsage(analysis.appUsage);
                 setFocusPeriods(analysis.focusPeriods);
@@ -203,9 +537,22 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
                 // 计算RPG属性
                 const stats = calculateRPGStats(events);
                 setRpgStats(stats);
-            } else {
-                // Reset stats if no data
-                setOverview({ workHours: 0, deepWorkHours: 0, tasksCompleted: 0, focusScore: 0 });
+                
+                // 保存统计数据到数据库（用于下次快速加载）
+                await saveDailyStats(date, {
+                    workHours: analysis.overview.workHours,
+                    deepWorkHours: analysis.overview.deepWorkHours,
+                    tasksCompleted: tasksCompletedOnDate, // 使用真实的任务完成数
+                    focusScore: analysis.overview.focusScore,
+                    timeDistribution: analysis.timeDistribution,
+                    appUsage: analysis.appUsage,
+                    focusPeriods: analysis.focusPeriods,
+                    rpgStats: stats
+                });
+            } else if (!cachedStats) {
+                // Reset stats if no data and no cache
+                // 即使没有 screenpipe 数据，也显示任务完成数
+                setOverview({ workHours: 0, deepWorkHours: 0, tasksCompleted: tasksCompletedOnDate, focusScore: 0 });
                 setTimeDistribution({
                     deepWork: { hours: 0, percent: 0 },
                     communication: { hours: 0, percent: 0 },
@@ -213,11 +560,17 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
                 });
                 setAppUsage([]);
                 setFocusPeriods([]);
+            } else {
+                // 如果有缓存但没有新数据，更新缓存中的任务完成数
+                setOverview(prev => ({
+                    ...prev,
+                    tasksCompleted: tasksCompletedOnDate
+                }));
             }
             
             // 获取任务统计（独立于events数据，目前还是全局统计，暂时保持不变）
             // TODO: 如果任务统计也需要支持历史日期，需要修改 taskAnalyzer
-            const taskAnalysis = analyzeTaskStats();
+            const taskAnalysis = await analyzeTaskStats();
             setTaskStats(taskAnalysis);
             
             // 转换任务完成数为柱状图高度
@@ -229,6 +582,16 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
             setLoading(false);
         }
     };
+    
+    // 数据加载完成后自动生成 AI 建议
+    useEffect(() => {
+        if (!loading && overview.workHours > 0 && ai && !aiInsight && !generatingInsight) {
+            const timer = setTimeout(() => {
+                generateAIInsight();
+            }, 800);
+            return () => clearTimeout(timer);
+        }
+    }, [loading, overview.workHours, ai]);
 
     const handleCopyToClipboard = async (text: string, type: 'daily' | 'weekly') => {
         try {
@@ -244,6 +607,315 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
             console.error('复制失败:', err);
         }
     };
+
+    // 开始编辑详细版日报
+    const handleEditDaily = () => {
+        setEditedDailyContent(dailyReport);
+        setEditingDaily(true);
+    };
+
+    // 保存编辑后的详细版日报
+    const handleSaveDaily = async () => {
+        setDailyReport(editedDailyContent);
+        await saveDailyReportToDB(editedDailyContent, selectedDate);
+        setEditingDaily(false);
+        console.log('💾 [日报-详细版] 手动编辑已保存');
+    };
+
+    // 取消编辑详细版
+    const handleCancelEdit = () => {
+        setEditingDaily(false);
+        setEditedDailyContent('');
+    };
+
+    // 开始编辑汇报版日报
+    const handleEditLeader = () => {
+        setEditedLeaderContent(leaderReport);
+        setEditingLeader(true);
+    };
+
+    // 保存编辑后的汇报版日报
+    const handleSaveLeader = async () => {
+        setLeaderReport(editedLeaderContent);
+        await saveReport('daily_leader' as any, selectedDate, editedLeaderContent);
+        setEditingLeader(false);
+        console.log('💾 [日报-汇报版] 手动编辑已保存');
+    };
+
+    // 取消编辑汇报版
+    const handleCancelEditLeader = () => {
+        setEditingLeader(false);
+        setEditedLeaderContent('');
+    };
+
+    // 生成领导版日报
+    const handleGenerateLeaderReport = async () => {
+        console.log('👔 [领导版日报] 开始生成...');
+        
+        if (!dailyReport || dailyReport === mockDailyReport) {
+            alert('请先生成详细版日报');
+            return;
+        }
+        
+        if (!ai) {
+            alert('请先在设置中配置 AI API Key');
+            return;
+        }
+        
+        setGeneratingLeader(true);
+        
+        try {
+            // 获取并使用自定义提示词
+            let promptTemplate = getCurrentPrompt('daily_leader');
+            
+            // 替换提示词中的变量
+            const promptContent = promptTemplate
+                .replace(/{date}/g, selectedDate)
+                .replace(/{workHours}/g, overview.workHours.toFixed(1))
+                .replace(/{deepWorkHours}/g, overview.deepWorkHours.toFixed(1))
+                .replace(/{focusScore}/g, String(overview.focusScore))
+                .replace(/{tasksCompleted}/g, String(overview.tasksCompleted))
+                .replace(/{deepWorkPercent}/g, String(timeDistribution.deepWork.percent))
+                .replace(/{communicationPercent}/g, String(timeDistribution.communication.percent))
+                .replace(/{topApps}/g, appUsage.slice(0, 5).map(a => `${a.appName} (${(a.totalMinutes / 60).toFixed(1)}h)`).join(', '));
+            
+            // 构建完整的 prompt
+            const fullPrompt = `${promptContent}
+
+## 原始工作记录（详细版日报）
+
+${dailyReport}
+
+请直接输出工作日报（Markdown 格式）：`;
+
+            // 基于详细版日报生成领导版
+            console.log('👔 [领导版日报] 使用自定义提示词生成...');
+            const response = await ai.generateContent({
+                model: modelName,
+                contents: fullPrompt
+            });
+            
+            const leaderReportContent = response.text.trim();
+            setLeaderReport(leaderReportContent);
+            
+            // 保存到数据库（使用不同的 type）
+            await saveReport('daily_leader' as any, selectedDate, leaderReportContent);
+            
+            // 自动切换到领导版查看
+            setCurrentVersion('leader');
+            
+            console.log('✅ [领导版日报] 生成成功并已保存');
+            
+        } catch (error: any) {
+            console.error('❌ [领导版日报] 生成失败:', error);
+            alert(`生成失败: ${error.message || error}`);
+        } finally {
+            setGeneratingLeader(false);
+        }
+    };
+
+    // 点击推送按钮（只推送领导版）
+    const handleClickPush = () => {
+        if (currentVersion !== 'leader' || !leaderReport) {
+            alert('请先生成领导版日报，只有领导版可以推送');
+            return;
+        }
+        setShowPatInput(true);
+    };
+
+    // 确认推送（用户输入 PAT 后）- 只推送领导版
+    const handleConfirmPush = async (pat: string) => {
+        setShowPatInput(false);
+        console.log('📤 [推送] 开始推送领导版日报...');
+        setPushingDaily(true);
+        
+        try {
+            // 调用 Tauri 命令推送日报（使用领导版内容）
+            const result = await invoke('push_daily_report', {
+                date: selectedDate,
+                content: leaderReport,
+                githubPat: pat
+            });
+            
+            console.log('✅ [推送] 成功:', result);
+            alert('领导版日报推送成功！');
+        } catch (error) {
+            console.error('❌ [推送] 失败:', error);
+            alert(`推送失败: ${error}`);
+        } finally {
+            setPushingDaily(false);
+        }
+    };
+
+    // 取消推送
+    const handleCancelPush = () => {
+        setShowPatInput(false);
+        console.log('❌ [推送] 用户取消');
+    };
+
+    // 生成 AI 深度分析建议
+    const generateAIInsight = async (forceRegenerate: boolean = false) => {
+        console.log('🤖 [AI分析] 开始生成深度分析建议...');
+        
+        if (!ai) {
+            console.warn('⚠️ [AI分析] AI 未配置');
+            setAiInsight('请先在设置中配置 AI API Key');
+            return;
+        }
+
+        if (overview.workHours === 0) {
+            console.warn('⚠️ [AI分析] 没有足够的数据');
+            setAiInsight('暂无数据，待积累更多工作记录后再来看看～');
+            return;
+        }
+
+        // 如果不是强制重新生成，先检查数据库中是否有缓存
+        if (!forceRegenerate) {
+            const cachedInsight = await getReport('ai_insight' as any, selectedDate);
+            if (cachedInsight) {
+                console.log('📖 [AI分析] 从数据库加载缓存:', selectedDate);
+                setAiInsight(cachedInsight);
+                return;
+            }
+        }
+
+        setGeneratingInsight(true);
+        
+        try {
+            // 准备数据摘要
+            const dataSummary = {
+                date: selectedDate,
+                workHours: overview.workHours.toFixed(1),
+                deepWorkHours: overview.deepWorkHours.toFixed(1),
+                focusScore: overview.focusScore,
+                deepWorkPercent: timeDistribution.deepWork.percent,
+                communicationPercent: timeDistribution.communication.percent,
+                leisurePercent: timeDistribution.leisure.percent,
+                topApps: appUsage.slice(0, 5).map(a => ({
+                    name: a.appName,
+                    hours: (a.totalMinutes / 60).toFixed(1)
+                })),
+                focusPeriods: focusPeriods.map(p => ({
+                    type: p.type === 'best' ? '最佳' : '低效',
+                    time: p.timeRange,
+                    description: p.description
+                }))
+            };
+
+            console.log('🤖 [AI分析] 数据摘要:', dataSummary);
+
+            // 调用 AI 生成建议
+            const response = await ai.generateContent({
+                model: modelName,
+                contents: `
+你是一位温暖、鼓励型的效率管理教练。根据用户的工作数据，提供积极、正面的效率分析和鼓励。
+
+数据概览：
+- 日期：${dataSummary.date}
+- 总工作时长：${dataSummary.workHours} 小时
+- 深度工作：${dataSummary.deepWorkHours} 小时 (${dataSummary.deepWorkPercent}%)
+- 专注度评分：${dataSummary.focusScore}
+- 会议沟通：${dataSummary.communicationPercent}%
+- 休息摸鱼：${dataSummary.leisurePercent}%
+
+主要应用使用情况：
+${dataSummary.topApps.map(a => `- ${a.name}: ${a.hours}h`).join('\n')}
+
+专注时段分析：
+${dataSummary.focusPeriods.map(p => `- ${p.type}时段 ${p.time}: ${p.description}`).join('\n')}
+
+要求：
+1. **以鼓励和赞美为主**，从积极的角度分析数据
+2. 用4-6句话，包含：
+   - 开头用夸赞和肯定（如"太棒了"、"做得很好"、"真的很努力"等）
+   - 具体指出做得好的地方（用数据支撑）
+   - 温和地提供1-2条改进建议（用"可以试试"、"或许能"等柔和语气）
+   - 结尾用鼓励的话语
+3. 语言要亲切、温暖、像朋友一样
+4. 总长度在150-200字
+5. 不要使用emoji、标题、序号或markdown格式，直接输出纯文本
+6. 即使数据不理想，也要从正面角度鼓励
+
+示例风格：
+"今天表现真不错！工作了7.5小时，深度工作占比达到65%，专注度也有85分，这说明你的时间管理很到位。特别是上午11-12点这个时段，连续工作效率很高。下午稍微有些分心是正常的，人的精力曲线本来就是这样的。建议可以在下午适当休息一下，喝杯咖啡或者散散步，会更有利于保持状态。继续保持这样的节奏，你会越来越优秀的！"
+
+请直接输出建议内容（不要有任何其他说明）：
+                `
+            });
+
+            const insight = response.text.trim();
+            setAiInsight(insight);
+            
+            // 保存到数据库
+            await saveReport('ai_insight' as any, selectedDate, insight);
+            
+            console.log('✅ [AI分析] 生成成功并已保存');
+            console.log('📝 [AI分析] 内容:', insight);
+            
+        } catch (error: any) {
+            console.error('❌ [AI分析] 生成失败:', error);
+            console.error('❌ [AI分析] 错误详情:', error.message);
+            setAiInsight('生成失败，请稍后重试或检查 API 配置');
+        } finally {
+            setGeneratingInsight(false);
+        }
+    };
+
+    // 当日期变化时清空 AI 建议
+    useEffect(() => {
+        setAiInsight('');
+    }, [selectedDate]);
+
+    // ==================== 提示词编辑处理 ====================
+    
+    const handleOpenPromptEditor = (type: 'daily_detailed' | 'daily_leader' | 'weekly_from_daily' | 'weekly_from_raw') => {
+        setEditingPromptType(type);
+        setShowPromptEditor(true);
+    };
+
+    const handleSavePrompt = (prompt: string) => {
+        saveCustomPrompt(editingPromptType, prompt);
+        alert(`✅ 提示词已保存！下次生成${
+            editingPromptType === 'daily_detailed' ? '详细版日报' :
+            editingPromptType === 'daily_leader' ? '汇报版日报' :
+            editingPromptType === 'weekly_from_daily' ? '周报（从日报）' :
+            '周报（从原始数据）'
+        }时将使用新的提示词。`);
+    };
+
+    const getPromptVariables = (type: 'daily_detailed' | 'daily_leader' | 'weekly_from_daily' | 'weekly_from_raw') => {
+        const baseVars = [
+            { name: '{date}', description: '日期' }
+        ];
+        
+        if (type.startsWith('daily')) {
+            return [
+                ...baseVars,
+                { name: '{workHours}', description: '工作时长' },
+                { name: '{deepWorkHours}', description: '深度工作时长' },
+                { name: '{focusScore}', description: '专注度评分' },
+                { name: '{tasksCompleted}', description: '完成任务数' },
+                { name: '{deepWorkPercent}', description: '深度工作占比' },
+                { name: '{communicationPercent}', description: '会议沟通占比' },
+                { name: '{topApps}', description: '主要使用的应用' }
+            ];
+        } else {
+            return [
+                { name: '{weekStart}', description: '周开始日期' },
+                { name: '{weekEnd}', description: '周结束日期' },
+                { name: '{workHours}', description: '总工作时长' },
+                { name: '{deepWorkHours}', description: '深度工作时长' },
+                { name: '{focusScore}', description: '专注度评分' },
+                { name: '{deepWorkPercent}', description: '深度工作占比' },
+                { name: '{communicationPercent}', description: '会议沟通占比' },
+                { name: '{topApps}', description: '主要应用' },
+                { name: '{dailyReportsText}', description: '本周日报内容（仅周报）' },
+                { name: '{dailySummary}', description: '每日概况（仅周报）' }
+            ];
+        }
+    };
+
+    // ==================== 日报生成 ====================
 
     const handleGenerateDailyReport = async () => {
         console.log('🔵 [日报] 点击了重新生成按钮');
@@ -264,7 +936,7 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
             }
 
             console.log('🔵 [日报] 开始生成，数据条数:', events.length);
-            console.log('🔵 [日报] API Key 存在:', !!process.env.API_KEY);
+            console.log('🔵 [日报] API Key 存在:', !!import.meta.env.VITE_GEMINI_API_KEY);
             console.log('🔵 [日报] 使用筛选策略:', reportSettings.filterStrategy);
 
             // 2. 使用选定的筛选策略
@@ -295,36 +967,66 @@ export const InsightsView = ({ onOpenRPGDetail }: InsightsViewProps) => {
             console.log('🔵 [日报] 最终数据条数:', summary.length);
             console.log('🔵 [日报] 数据样本:', summary.slice(0, 3));
 
-            // 3. 调用 Gemini 生成报告
-            console.log('🔵 [日报] 开始调用 Gemini API...');
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `
-你是一个专业的工作日报生成助手。
+            // 检查 AI 客户端
+            if (!ai) {
+                alert('请先在设置中配置 AI API Key');
+                return;
+            }
 
-根据用户 ${selectedDate} 的屏幕活动日志，生成一份结构化的工作日报。
+            // 3. 准备统计数据
+            const statsData = {
+                workHours: overview.workHours.toFixed(1),
+                deepWorkHours: overview.deepWorkHours.toFixed(1),
+                focusScore: overview.focusScore,
+                tasksCompleted: overview.tasksCompleted,
+                deepWorkPercent: timeDistribution.deepWork.percent,
+                communicationPercent: timeDistribution.communication.percent,
+                topApps: appUsage.slice(0, 5).map(a => `${a.appName} (${(a.totalMinutes / 60).toFixed(1)}h)`).join(', ')
+            };
 
-要求：
-1. 使用 Markdown 格式
-2. 包含以下部分：
-   - 📅 日报 (${selectedDate})
-   - 🚀 开发进度
-   - 💬 沟通与会议
-   - 📚 调研
-3. 过滤掉娱乐和摸鱼内容
-4. 突出重要成果和数据
-5. 语言简洁专业
+            // 4. 获取并使用自定义提示词
+            let promptTemplate = getCurrentPrompt('daily_detailed');
+            
+            // 替换提示词中的变量
+            const promptContent = promptTemplate
+                .replace(/{date}/g, selectedDate)
+                .replace(/{workHours}/g, statsData.workHours)
+                .replace(/{deepWorkHours}/g, statsData.deepWorkHours)
+                .replace(/{focusScore}/g, String(statsData.focusScore))
+                .replace(/{tasksCompleted}/g, String(statsData.tasksCompleted))
+                .replace(/{deepWorkPercent}/g, String(statsData.deepWorkPercent))
+                .replace(/{communicationPercent}/g, String(statsData.communicationPercent))
+                .replace(/{topApps}/g, statsData.topApps);
+            
+            // 构建完整的 prompt（提示词 + 数据）
+            const fullPrompt = `${promptContent}
 
-活动日志：
+## 工作统计数据
+- 总工作时长：${statsData.workHours} 小时
+- 深度工作时长：${statsData.deepWorkHours} 小时 (${statsData.deepWorkPercent}%)
+- 专注度评分：${statsData.focusScore}/100
+- 完成任务数：${statsData.tasksCompleted} 个
+- 会议沟通占比：${statsData.communicationPercent}%
+- 主要工具：${statsData.topApps}
+
+## 活动日志明细
 ${JSON.stringify(summary, null, 2)}
-                `
+
+请直接输出完整的 Markdown 格式日报：`;
+
+            // 5. 调用 AI 生成报告
+            console.log('🔵 [日报] 开始调用 AI（使用自定义提示词）...');
+            const response = await ai.generateContent({
+                model: modelName,
+                contents: fullPrompt
             });
 
             console.log('✅ [日报] Gemini API 调用成功');
             console.log('✅ [日报] 生成的报告（前200字符）:', response.text.substring(0, 200));
             
             // 检查是否已有保存的报告
-            if (hasExistingDailyReport(selectedDate)) {
+            const hasExisting = await hasExistingDailyReport(selectedDate);
+            if (hasExisting) {
                 // 有已保存的报告，询问是否覆盖
                 console.log('⚠️ [日报] 发现已保存的报告，询问是否覆盖');
                 setPendingReport({ type: 'daily', content: response.text });
@@ -332,7 +1034,7 @@ ${JSON.stringify(summary, null, 2)}
             } else {
                 // 没有已保存的报告，直接保存
                 setDailyReport(response.text);
-                saveDailyReport(response.text, selectedDate);
+                await saveDailyReportToDB(response.text, selectedDate);
                 console.log('✅ [日报] 报告已更新并保存');
             }
             
@@ -347,119 +1049,182 @@ ${JSON.stringify(summary, null, 2)}
         }
     };
 
+    // 获取本周所有日报的辅助函数
+    const getWeekDailyReports = async (version: 'detailed' | 'leader') => {
+        const reports: Array<{ date: string; content: string }> = [];
+        const weekStart = new Date();
+        weekStart.setDate(weekStart.getDate() - (weekStart.getDay() === 0 ? 6 : weekStart.getDay() - 1));
+        weekStart.setHours(0, 0, 0, 0);
+        
+        for (let i = 0; i < 7; i++) {
+            const dayDate = new Date(weekStart);
+            dayDate.setDate(weekStart.getDate() + i);
+            const dateStr = dayDate.toLocaleDateString('en-CA'); // YYYY-MM-DD 格式
+            
+            // 根据版本选择加载详细版或汇报版日报
+            const reportType = version === 'detailed' ? 'daily' : 'daily_leader';
+            const reportContent = await getReport(reportType as any, dateStr);
+            
+            if (reportContent) {
+                reports.push({ date: dateStr, content: reportContent });
+            }
+        }
+        
+        return reports;
+    };
+
     const handleGenerateWeeklyReport = async () => {
         console.log('🟣 [周报] 点击了重新生成按钮');
+        console.log('🟣 [周报] 生成方式:', weeklyGenMethod);
+        console.log('🟣 [周报] 日报版本:', weeklyDailyVersion);
         
         setGeneratingWeekly(true);
         
         try {
-            // 1. 获取本周的事件
-            console.log('🟣 [周报] 开始获取本周数据...');
-            const weekEvents = await getWeekEvents();
-            console.log('🟣 [周报] 获取到数据条数:', weekEvents.length);
-            
-            if (weekEvents.length === 0) {
-                console.warn('⚠️ [周报] 本周没有数据！');
-                alert('本周还没有足够的活动数据');
+            // 检查 AI 客户端
+            if (!ai) {
+                alert('请先在设置中配置 AI API Key');
                 setGeneratingWeekly(false);
                 return;
             }
 
-            // 2. 使用选定的筛选策略
-            console.log('🟣 [周报] 原始数据条数:', weekEvents.length);
-            console.log('🟣 [周报] 使用筛选策略:', reportSettings.filterStrategy);
-            
-            const sampledWeekEvents = filterEvents(
-                weekEvents,
-                reportSettings.filterStrategy,
-                reportSettings.customApps,
-                reportSettings.maxWeeklyRecords
-            );
-
-            console.log('🟣 [周报] 筛选后数据条数:', sampledWeekEvents.length);
-
-            if (sampledWeekEvents.length === 0) {
-                console.warn('⚠️ [周报] 筛选后没有数据！');
-                alert('筛选后没有数据，请检查筛选设置');
-                setGeneratingWeekly(false);
-                return;
-            }
-            
-            // 3. 按天分组统计
-            const dailySummaries = [];
+            let response;
+            const today = new Date();
             const weekStart = new Date();
             weekStart.setDate(weekStart.getDate() - (weekStart.getDay() === 0 ? 6 : weekStart.getDay() - 1));
             weekStart.setHours(0, 0, 0, 0);
-            
-            for (let i = 0; i < 7; i++) {
-                const dayStart = new Date(weekStart);
-                dayStart.setDate(weekStart.getDate() + i);
-                const dayEnd = new Date(dayStart);
-                dayEnd.setHours(23, 59, 59, 999);
+
+            if (weeklyGenMethod === 'from_daily') {
+                // ========== 方式1: 从日报生成周报 ==========
+                console.log('🟣 [周报] 从日报生成周报...');
+                const dailyReports = await getWeekDailyReports(weeklyDailyVersion);
                 
-                const dayEvents = sampledWeekEvents.filter(e => {
-                    const eventTime = new Date(e.timestamp);
-                    return eventTime >= dayStart && eventTime <= dayEnd;
-                });
-                
-                if (dayEvents.length > 0) {
-                    const dayAnalysis = analyzeTodayEvents(dayEvents);
-                    dailySummaries.push({
-                        date: dayStart.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', weekday: 'short' }),
-                        workHours: dayAnalysis.overview.workHours,
-                        deepWorkHours: dayAnalysis.overview.deepWorkHours,
-                        topApps: dayAnalysis.appUsage.slice(0, 3).map(a => a.appName).join(', ')
-                    });
+                if (dailyReports.length === 0) {
+                    alert(`本周还没有${weeklyDailyVersion === 'detailed' ? '详细版' : '汇报版'}日报，请先生成日报或选择从原始数据生成`);
+                    setGeneratingWeekly(false);
+                    return;
                 }
+
+                console.log('🟣 [周报] 找到日报数量:', dailyReports.length);
+
+                // 构建日报汇总文本
+                const dailyReportsText = dailyReports.map(r => {
+                    const dateObj = new Date(r.date);
+                    const dateStr = dateObj.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', weekday: 'short' });
+                    return `\n### ${dateStr}\n${r.content}\n`;
+                }).join('\n---\n');
+
+                // 获取并使用自定义提示词
+                let promptTemplate = getCurrentPrompt('weekly_from_daily');
+                const promptContent = promptTemplate
+                    .replace(/{weekStart}/g, weekStart.toLocaleDateString('zh-CN'))
+                    .replace(/{weekEnd}/g, today.toLocaleDateString('zh-CN'))
+                    .replace(/{dailyReportsText}/g, dailyReportsText);
+
+                console.log('🟣 [周报] 使用自定义提示词（从日报生成）...');
+                response = await ai.generateContent({
+                    model: modelName,
+                    contents: promptContent
+                });
+
+            } else {
+                // ========== 方式2: 从原始数据生成周报 ==========
+                console.log('🟣 [周报] 从原始数据生成周报...');
+                
+                // 1. 获取本周的事件
+                console.log('🟣 [周报] 开始获取本周数据...');
+                const weekEvents = await getWeekEvents();
+                console.log('🟣 [周报] 获取到数据条数:', weekEvents.length);
+            
+                if (weekEvents.length === 0) {
+                    console.warn('⚠️ [周报] 本周没有数据！');
+                    alert('本周还没有足够的活动数据');
+                    setGeneratingWeekly(false);
+                    return;
+                }
+
+                // 2. 使用选定的筛选策略
+                console.log('🟣 [周报] 原始数据条数:', weekEvents.length);
+                console.log('🟣 [周报] 使用筛选策略:', reportSettings.filterStrategy);
+                
+                const sampledWeekEvents = filterEvents(
+                    weekEvents,
+                    reportSettings.filterStrategy,
+                    reportSettings.customApps,
+                    reportSettings.maxWeeklyRecords
+                );
+
+                console.log('🟣 [周报] 筛选后数据条数:', sampledWeekEvents.length);
+
+                if (sampledWeekEvents.length === 0) {
+                    console.warn('⚠️ [周报] 筛选后没有数据！');
+                    alert('筛选后没有数据，请检查筛选设置');
+                    setGeneratingWeekly(false);
+                    return;
+                }
+                
+                // 3. 按天分组统计
+                const dailySummaries = [];
+                
+                for (let i = 0; i < 7; i++) {
+                    const dayStart = new Date(weekStart);
+                    dayStart.setDate(weekStart.getDate() + i);
+                    const dayEnd = new Date(dayStart);
+                    dayEnd.setHours(23, 59, 59, 999);
+                    
+                    const dayEvents = sampledWeekEvents.filter(e => {
+                        const eventTime = new Date(e.timestamp);
+                        return eventTime >= dayStart && eventTime <= dayEnd;
+                    });
+                    
+                    if (dayEvents.length > 0) {
+                        const dayAnalysis = analyzeTodayEvents(dayEvents);
+                        dailySummaries.push({
+                            date: dayStart.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', weekday: 'short' }),
+                            workHours: dayAnalysis.overview.workHours,
+                            deepWorkHours: dayAnalysis.overview.deepWorkHours,
+                            topApps: dayAnalysis.appUsage.slice(0, 3).map(a => a.appName).join(', ')
+                        });
+                    }
+                }
+
+                // 4. 整体统计
+                const weekAnalysis = analyzeTodayEvents(sampledWeekEvents);
+                
+                console.log('🟣 [周报] 开始调用 Gemini API...');
+                console.log('🟣 [周报] 日期范围:', weekStart.toLocaleDateString('zh-CN'), '~', today.toLocaleDateString('zh-CN'));
+                console.log('🟣 [周报] 工作时长:', weekAnalysis.overview.workHours.toFixed(1), '小时');
+
+                // 获取并使用自定义提示词
+                const dailySummaryText = dailySummaries.map(d => 
+                    `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深度工作 ${d.deepWorkHours.toFixed(1)}h, 主要: ${d.topApps}`
+                ).join('\n');
+
+                let promptTemplate = getCurrentPrompt('weekly_from_raw');
+                const promptContent = promptTemplate
+                    .replace(/{weekStart}/g, weekStart.toLocaleDateString('zh-CN'))
+                    .replace(/{weekEnd}/g, today.toLocaleDateString('zh-CN'))
+                    .replace(/{workHours}/g, weekAnalysis.overview.workHours.toFixed(1))
+                    .replace(/{deepWorkHours}/g, weekAnalysis.overview.deepWorkHours.toFixed(1))
+                    .replace(/{focusScore}/g, String(weekAnalysis.overview.focusScore))
+                    .replace(/{deepWorkPercent}/g, String(weekAnalysis.timeDistribution.deepWork.percent))
+                    .replace(/{communicationPercent}/g, String(weekAnalysis.timeDistribution.communication.percent))
+                    .replace(/{topApps}/g, weekAnalysis.appUsage.map(a => a.appName).join(', '))
+                    .replace(/{dailySummary}/g, dailySummaryText);
+
+                console.log('🟣 [周报] 使用自定义提示词（从原始数据生成）...');
+                response = await ai.generateContent({
+                    model: modelName,
+                    contents: promptContent
+                });
             }
-
-            // 4. 整体统计
-            const weekAnalysis = analyzeTodayEvents(sampledWeekEvents);
-            
-            // 5. 调用 Gemini 生成周报
-            const today = new Date();
-            const weekStartDate = new Date(weekStart);
-            
-            console.log('🟣 [周报] 开始调用 Gemini API...');
-            console.log('🟣 [周报] 日期范围:', weekStartDate.toLocaleDateString('zh-CN'), '~', today.toLocaleDateString('zh-CN'));
-            console.log('🟣 [周报] 工作时长:', weekAnalysis.overview.workHours.toFixed(1), '小时');
-            
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: `
-你是一个专业的工作周报生成助手。
-
-根据用户本周的屏幕活动数据，生成一份结构化的工作周报。
-
-要求：
-1. 使用 Markdown 格式
-2. 包含以下部分：
-   - 🗓️ 周报 (${weekStartDate.toLocaleDateString('zh-CN')} ~ ${today.toLocaleDateString('zh-CN')})
-   - 🌟 本周亮点
-   - 📊 数据统计
-   - 🚧 改进建议
-   - 📈 下周计划
-3. 基于数据提供洞察，而不是简单罗列
-4. 语言简洁专业
-
-本周统计数据：
-- 总工作时长：${weekAnalysis.overview.workHours.toFixed(1)} 小时
-- 深度工作时长：${weekAnalysis.overview.deepWorkHours.toFixed(1)} 小时
-- 专注度评分：${weekAnalysis.overview.focusScore}
-- 深度工作占比：${weekAnalysis.timeDistribution.deepWork.percent}%
-- 会议沟通占比：${weekAnalysis.timeDistribution.communication.percent}%
-- 主要应用：${weekAnalysis.appUsage.map(a => a.appName).join(', ')}
-
-每日概况：
-${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深度工作 ${d.deepWorkHours.toFixed(1)}h, 主要: ${d.topApps}`).join('\n')}
-                `
-            });
 
             console.log('✅ [周报] Gemini API 调用成功');
             console.log('✅ [周报] 生成的报告（前200字符）:', response.text.substring(0, 200));
             
             // 检查是否已有保存的报告
-            if (hasExistingWeeklyReport()) {
+            const hasExisting = await hasExistingWeeklyReport();
+            if (hasExisting) {
                 // 有已保存的报告，询问是否覆盖
                 console.log('⚠️ [周报] 发现已保存的报告，询问是否覆盖');
                 setPendingReport({ type: 'weekly', content: response.text });
@@ -467,7 +1232,7 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
             } else {
                 // 没有已保存的报告，直接保存
                 setWeeklyReport(response.text);
-                saveWeeklyReport(response.text);
+                await saveWeeklyReportToDB(response.text);
                 console.log('✅ [周报] 报告已更新并保存');
             }
             
@@ -633,10 +1398,45 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
                 <div className="glass p-8 rounded-3xl border border-white/60 relative overflow-hidden group">
                     <div className="absolute -bottom-24 -left-24 w-64 h-64 bg-gradient-to-tr from-violet-100/40 to-fuchsia-100/40 rounded-full blur-3xl -z-10 pointer-events-none group-hover:scale-125 transition-transform duration-1000"></div>
                     
-                    <h3 className="font-bold text-stone-700 mb-6 flex items-center gap-2 text-lg">
-                        <SparklesIcon className="w-5 h-5 text-violet-500"/>
-                        效率分析与建议
-                    </h3>
+                    <div className="flex justify-between items-start mb-6">
+                        <h3 className="font-bold text-stone-700 flex items-center gap-2 text-lg">
+                            <SparklesIcon className="w-5 h-5 text-violet-500"/>
+                            效率分析与建议
+                        </h3>
+                    </div>
+
+                    {/* AI 深度分析 */}
+                    {ai && (
+                        <div className="mb-6 bg-gradient-to-br from-violet-50 to-fuchsia-50 border-2 border-violet-200 rounded-2xl p-5 relative">
+                            <div className="flex items-start justify-between mb-3">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-xl">🤖</span>
+                                    <h4 className="text-sm font-bold text-violet-700">AI 深度分析</h4>
+                                </div>
+                                <button
+                                    onClick={() => generateAIInsight(true)}
+                                    disabled={generatingInsight || loading}
+                                    className="text-xs text-violet-600 hover:text-violet-800 font-semibold flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-violet-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="重新生成 AI 分析"
+                                >
+                                    <SparklesIcon className="w-3 h-3" />
+                                    {generatingInsight ? '生成中...' : '刷新'}
+                                </button>
+                            </div>
+                            <div className="text-sm text-violet-900 leading-[1.8]">
+                                {generatingInsight ? (
+                                    <div className="flex items-center gap-2 text-violet-600">
+                                        <div className="animate-spin">⚙️</div>
+                                        <span>AI 正在用心分析你的工作数据...</span>
+                                    </div>
+                                ) : aiInsight ? (
+                                    <p className="whitespace-pre-line">{aiInsight}</p>
+                                ) : (
+                                    <p className="text-violet-600">✨ 点击右上角刷新按钮，让 AI 为你生成专属的鼓励和建议</p>
+                                )}
+                            </div>
+                        </div>
+                    )}
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         {/* Focus Periods */}
@@ -871,35 +1671,209 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
                             >
                                 ⚙️
                             </button>
+                            {/* 版本切换标签 */}
+                            <div className="flex items-center gap-1 ml-2 bg-white/50 rounded-lg p-1">
+                                <button
+                                    onClick={() => setCurrentVersion('self')}
+                                    className={`text-xs font-bold px-2 py-1 rounded transition-colors ${
+                                        currentVersion === 'self'
+                                            ? 'bg-blue-500 text-white'
+                                            : 'text-stone-500 hover:text-stone-700'
+                                    }`}
+                                >
+                                    详细版
+                                </button>
+                                <button
+                                    onClick={() => setCurrentVersion('leader')}
+                                    className={`text-xs font-bold px-2 py-1 rounded transition-colors ${
+                                        currentVersion === 'leader'
+                                            ? 'bg-amber-500 text-white'
+                                            : 'text-stone-500 hover:text-stone-700'
+                                    }`}
+                                    title={!leaderReport ? '还未生成汇报版，点击切换后可以编辑提示词和生成' : '切换到汇报版'}
+                                >
+                                    👔 汇报版
+                                </button>
+                            </div>
                         </div>
-                        <button 
-                            onClick={() => handleCopyToClipboard(dailyReport, 'daily')}
-                            className={`flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors ${
-                                copiedDaily 
-                                    ? 'text-emerald-700 bg-emerald-100' 
-                                    : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
-                            }`}
-                        >
-                            <CopyIcon className="w-3 h-3" />
-                            {copiedDaily ? '已复制!' : '复制'}
-                        </button>
+                        <div className="flex items-center gap-2">
+                            {/* 详细版按钮 */}
+                            {!editingDaily && !editingLeader && currentVersion === 'self' && (
+                                <>
+                                    <button 
+                                        onClick={handleEditDaily}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-blue-600 bg-blue-50 hover:bg-blue-100"
+                                    >
+                                        ✏️ 编辑
+                                    </button>
+                                    <button 
+                                        onClick={() => handleCopyToClipboard(dailyReport, 'daily')}
+                                        className={`flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors ${
+                                            copiedDaily 
+                                                ? 'text-emerald-700 bg-emerald-100' 
+                                                : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
+                                        }`}
+                                    >
+                                        <CopyIcon className="w-3 h-3" />
+                                        {copiedDaily ? '已复制!' : '复制'}
+                                    </button>
+                                </>
+                            )}
+                            {/* 汇报版按钮 */}
+                            {!editingDaily && !editingLeader && currentVersion === 'leader' && leaderReport && (
+                                <>
+                                    <button 
+                                        onClick={handleEditLeader}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-amber-600 bg-amber-50 hover:bg-amber-100"
+                                    >
+                                        ✏️ 编辑
+                                    </button>
+                                    <button 
+                                        onClick={() => handleCopyToClipboard(leaderReport, 'daily')}
+                                        className={`flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors ${
+                                            copiedDaily 
+                                                ? 'text-emerald-700 bg-emerald-100' 
+                                                : 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100'
+                                        }`}
+                                    >
+                                        <CopyIcon className="w-3 h-3" />
+                                        {copiedDaily ? '已复制!' : '复制'}
+                                    </button>
+                                </>
+                            )}
+                            {/* 详细版编辑中 */}
+                            {editingDaily && (
+                                <>
+                                    <button 
+                                        onClick={handleCancelEdit}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-stone-600 bg-stone-50 hover:bg-stone-100"
+                                    >
+                                        ✖️ 取消
+                                    </button>
+                                    <button 
+                                        onClick={handleSaveDaily}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-emerald-600 bg-emerald-50 hover:bg-emerald-100"
+                                    >
+                                        💾 保存
+                                    </button>
+                                </>
+                            )}
+                            {/* 汇报版编辑中 */}
+                            {editingLeader && (
+                                <>
+                                    <button 
+                                        onClick={handleCancelEditLeader}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-stone-600 bg-stone-50 hover:bg-stone-100"
+                                    >
+                                        ✖️ 取消
+                                    </button>
+                                    <button 
+                                        onClick={handleSaveLeader}
+                                        className="flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg transition-colors text-emerald-600 bg-emerald-50 hover:bg-emerald-100"
+                                    >
+                                        💾 保存
+                                    </button>
+                                </>
+                            )}
+                        </div>
                      </div>
                      
                     <div className="flex-1 bg-white/50 rounded-xl p-4 border border-stone-100 overflow-y-auto max-h-64 text-xs text-stone-600 leading-relaxed shadow-inner">
-                        <div className="prose prose-xs prose-stone max-w-none">
-                            <ReactMarkdown>{dailyReport}</ReactMarkdown>
-                        </div>
+                        {/* 详细版 - 编辑模式 */}
+                        {editingDaily && currentVersion === 'self' ? (
+                            <textarea
+                                value={editedDailyContent}
+                                onChange={(e) => setEditedDailyContent(e.target.value)}
+                                className="w-full h-full min-h-[200px] bg-transparent border-none outline-none resize-none font-mono text-xs"
+                                placeholder="编辑详细版日报内容..."
+                            />
+                        ) : /* 详细版 - 查看模式 */ currentVersion === 'self' ? (
+                            <div className="prose prose-xs prose-stone max-w-none">
+                                <ReactMarkdown>{dailyReport}</ReactMarkdown>
+                            </div>
+                        ) : /* 汇报版 - 编辑模式 */ editingLeader ? (
+                            <textarea
+                                value={editedLeaderContent}
+                                onChange={(e) => setEditedLeaderContent(e.target.value)}
+                                className="w-full h-full min-h-[200px] bg-transparent border-none outline-none resize-none font-mono text-xs"
+                                placeholder="编辑汇报版日报内容..."
+                            />
+                        ) : /* 汇报版 - 查看模式 */ leaderReport ? (
+                            <div className="prose prose-xs prose-stone max-w-none">
+                                <ReactMarkdown>{leaderReport}</ReactMarkdown>
+                            </div>
+                        ) : /* 汇报版 - 未生成 */ (
+                            <div className="flex flex-col items-center justify-center h-full text-center py-8">
+                                <div className="text-4xl mb-3">👔</div>
+                                <p className="text-sm text-stone-500 mb-4">还没有生成汇报版日报</p>
+                                <button
+                                    onClick={handleGenerateLeaderReport}
+                                    disabled={generatingLeader || !dailyReport || dailyReport === mockDailyReport}
+                                    className="text-xs font-bold px-4 py-2 rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                >
+                                    <SparklesIcon className="w-3 h-3" />
+                                    {generatingLeader ? '生成中...' : '生成汇报版'}
+                                </button>
+                            </div>
+                        )}
                      </div>
                      
-                    <div className="mt-3 text-center">
-                        <button 
-                            onClick={handleGenerateDailyReport}
-                            disabled={generatingDaily}
-                            className="text-xs font-bold text-stone-400 hover:text-rose-500 flex items-center justify-center gap-1 mx-auto transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            <SparklesIcon className="w-3 h-3" />
-                            {generatingDaily ? '生成中...' : '重新生成'}
-                        </button>
+                    <div className="mt-3 flex items-center justify-between">
+                        {currentVersion === 'self' ? (
+                            <>
+                                <div className="flex items-center gap-2">
+                                    <button 
+                                        onClick={handleGenerateDailyReport}
+                                        disabled={generatingDaily || editingDaily || editingLeader}
+                                        className="text-xs font-bold text-stone-400 hover:text-rose-500 flex items-center justify-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        <SparklesIcon className="w-3 h-3" />
+                                        {generatingDaily ? '生成中...' : '重新生成'}
+                                    </button>
+                                    <button 
+                                        onClick={() => handleOpenPromptEditor('daily_detailed')}
+                                        className="text-xs font-semibold text-blue-500 hover:text-blue-600 flex items-center gap-1 transition-colors"
+                                        title="自定义提示词"
+                                    >
+                                        ⚙️ 编辑提示词
+                                    </button>
+                                </div>
+                                <button 
+                                    onClick={handleGenerateLeaderReport}
+                                    disabled={generatingLeader || editingDaily || editingLeader || !dailyReport || dailyReport === mockDailyReport}
+                                    className="text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 flex items-center gap-1"
+                                >
+                                    {generatingLeader ? '生成中...' : '👔 生成汇报版'}
+                                </button>
+                            </>
+                        ) : (
+                            <>
+                                <div className="flex items-center gap-2">
+                                    <button 
+                                        onClick={handleGenerateLeaderReport}
+                                        disabled={generatingLeader || editingDaily || editingLeader || !dailyReport || dailyReport === mockDailyReport}
+                                        className="text-xs font-bold text-stone-400 hover:text-amber-500 flex items-center justify-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                    >
+                                        <SparklesIcon className="w-3 h-3" />
+                                        {generatingLeader ? '重新生成中...' : '重新生成'}
+                                    </button>
+                                    <button 
+                                        onClick={() => handleOpenPromptEditor('daily_leader')}
+                                        className="text-xs font-semibold text-amber-500 hover:text-amber-600 flex items-center gap-1 transition-colors"
+                                        title="自定义提示词"
+                                    >
+                                        ⚙️ 编辑提示词
+                                    </button>
+                                </div>
+                                <button 
+                                    onClick={handleClickPush}
+                                    disabled={pushingDaily || editingDaily || editingLeader || !leaderReport}
+                                    className="text-xs font-bold px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-white bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600 flex items-center gap-1"
+                                >
+                                    {pushingDaily ? '推送中...' : '📤 推送到 GitHub'}
+                                </button>
+                            </>
+                        )}
                      </div>
                 </div>
 
@@ -922,6 +1896,77 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
                             {copiedWeekly ? '已复制!' : '复制'}
                         </button>
                      </div>
+
+                    {/* 生成方式选择 */}
+                    <div className="mb-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-stone-500">生成方式：</span>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={() => setWeeklyGenMethod('from_daily')}
+                                    className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${
+                                        weeklyGenMethod === 'from_daily'
+                                            ? 'bg-violet-500 text-white shadow-md'
+                                            : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                                    }`}
+                                >
+                                    📄 根据日报生成
+                                </button>
+                                <button
+                                    onClick={() => setWeeklyGenMethod('from_raw')}
+                                    className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${
+                                        weeklyGenMethod === 'from_raw'
+                                            ? 'bg-violet-500 text-white shadow-md'
+                                            : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                                    }`}
+                                >
+                                    🔍 根据原始数据生成
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* 如果选择从日报生成，显示日报版本选择 */}
+                        {weeklyGenMethod === 'from_daily' && (
+                            <div className="flex items-center gap-2">
+                                <span className="text-xs font-semibold text-stone-500">日报版本：</span>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={() => setWeeklyDailyVersion('detailed')}
+                                        className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${
+                                            weeklyDailyVersion === 'detailed'
+                                                ? 'bg-blue-500 text-white shadow-md'
+                                                : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                                        }`}
+                                    >
+                                        📝 详细版
+                                    </button>
+                                    <button
+                                        onClick={() => setWeeklyDailyVersion('leader')}
+                                        className={`text-xs px-3 py-1.5 rounded-lg font-semibold transition-all ${
+                                            weeklyDailyVersion === 'leader'
+                                                ? 'bg-amber-500 text-white shadow-md'
+                                                : 'bg-stone-100 text-stone-600 hover:bg-stone-200'
+                                        }`}
+                                    >
+                                        📋 汇报版
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* 提示信息 */}
+                        <div className="text-xs text-stone-400 bg-stone-50 rounded-lg p-2">
+                            {weeklyGenMethod === 'from_daily' ? (
+                                <>
+                                    💡 <strong>根据日报生成：</strong>汇总本周每天的{weeklyDailyVersion === 'detailed' ? '详细版' : '汇报版'}日报，内容更完整不易丢失信息
+                                </>
+                            ) : (
+                                <>
+                                    💡 <strong>根据原始数据生成：</strong>直接分析本周屏幕活动数据，更灵活但受数据量限制
+                                </>
+                            )}
+                        </div>
+                    </div>
                      
                     <div className="flex-1 bg-white/50 rounded-xl p-4 border border-stone-100 overflow-y-auto max-h-64 text-xs text-stone-600 leading-relaxed shadow-inner">
                         <div className="prose prose-xs prose-stone max-w-none">
@@ -929,14 +1974,21 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
                         </div>
                      </div>
                      
-                    <div className="mt-3 text-center">
+                    <div className="mt-3 flex items-center justify-center gap-2">
                         <button 
                             onClick={handleGenerateWeeklyReport}
                             disabled={generatingWeekly}
-                            className="text-xs font-bold text-stone-400 hover:text-violet-500 flex items-center justify-center gap-1 mx-auto transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            className="text-xs font-bold text-stone-400 hover:text-violet-500 flex items-center justify-center gap-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <SparklesIcon className="w-3 h-3" />
                             {generatingWeekly ? '生成中...' : '重新生成'}
+                        </button>
+                        <button 
+                            onClick={() => handleOpenPromptEditor(weeklyGenMethod === 'from_daily' ? 'weekly_from_daily' : 'weekly_from_raw')}
+                            className="text-xs font-semibold text-violet-500 hover:text-violet-600 flex items-center gap-1 transition-colors"
+                            title={`自定义提示词（${weeklyGenMethod === 'from_daily' ? '从日报生成' : '从原始数据生成'}）`}
+                        >
+                            ⚙️ 编辑提示词
                         </button>
                      </div>
                 </div>
@@ -960,6 +2012,30 @@ ${dailySummaries.map(d => `- ${d.date}: 工作 ${d.workHours.toFixed(1)}h, 深�
                 cancelText="保留原有"
                 onConfirm={() => handleConfirmOverwrite(true)}
                 onCancel={() => handleConfirmOverwrite(false)}
+            />
+
+            {/* PAT 输入模态框 */}
+            <PatInputModal
+                isOpen={showPatInput}
+                onConfirm={handleConfirmPush}
+                onCancel={handleCancelPush}
+            />
+
+            {/* 提示词编辑器 */}
+            <PromptEditorModal
+                isOpen={showPromptEditor}
+                title={`自定义提示词 - ${
+                    editingPromptType === 'daily_detailed' ? '日报（详细版）' :
+                    editingPromptType === 'daily_leader' ? '日报（汇报版）' :
+                    editingPromptType === 'weekly_from_daily' ? '周报（从日报生成）' :
+                    '周报（从原始数据生成）'
+                }`}
+                promptType={editingPromptType}
+                defaultPrompt={DEFAULT_PROMPTS[editingPromptType]}
+                currentPrompt={getCurrentPrompt(editingPromptType)}
+                availableVariables={getPromptVariables(editingPromptType)}
+                onSave={handleSavePrompt}
+                onClose={() => setShowPromptEditor(false)}
             />
         </div>
     );

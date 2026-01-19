@@ -98,8 +98,8 @@ function isCompletedLastWeek(task: Task): boolean {
 /**
  * 分析任务数据，生成统计信息
  */
-export function analyzeTaskStats(): TaskStats {
-  const tasks = storage.getTasks() || [];
+export async function analyzeTaskStats(): Promise<TaskStats> {
+  const tasks = await storage.getTasks() || [];
   
   console.log('📊 开始分析任务统计:', {
     totalTasks: tasks.length,
@@ -244,8 +244,8 @@ export function analyzeTaskStats(): TaskStats {
  * 获取本周任务完成趋势（用于柱状图）
  * 返回7个数字，代表周一到周日的完成任务数
  */
-export function getWeeklyTaskTrend(): number[] {
-  const stats = analyzeTaskStats();
+export async function getWeeklyTaskTrend(): Promise<number[]> {
+  const stats = await analyzeTaskStats();
   return stats.dailyCompletionCounts;
 }
 

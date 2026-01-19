@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { ChatMessage } from '../../types';
-import { BotIcon, XIcon, SendIcon } from '../icons';
+import { BotIcon, XIcon, SendIcon, TrashIcon } from '../icons';
 
 interface ChatSidebarProps {
   isOpen: boolean;
@@ -11,6 +11,7 @@ interface ChatSidebarProps {
   onInputChange: (value: string) => void;
   onSubmit: (e?: React.FormEvent) => void;
   onQuickQuestion: (question: string) => void;
+  onClearChat: () => void;
 }
 
 export const ChatSidebar = ({
@@ -21,7 +22,8 @@ export const ChatSidebar = ({
   onClose,
   onInputChange,
   onSubmit,
-  onQuickQuestion
+  onQuickQuestion,
+  onClearChat
 }: ChatSidebarProps) => {
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -43,9 +45,21 @@ export const ChatSidebar = ({
            </div>
            项目助理
          </h3>
-         <button onClick={onClose} className="text-stone-400 hover:text-rose-500 bg-white/50 hover:bg-white p-1.5 rounded-lg transition-all">
-           <XIcon className="w-5 h-5" />
-         </button>
+         <div className="flex items-center gap-2">
+           <button 
+             onClick={onClearChat}
+             title="清空聊天记录"
+             className="text-stone-400 hover:text-amber-500 bg-white/50 hover:bg-white p-1.5 rounded-lg transition-all"
+           >
+             <TrashIcon className="w-4 h-4" />
+           </button>
+           <button 
+             onClick={onClose} 
+             className="text-stone-400 hover:text-rose-500 bg-white/50 hover:bg-white p-1.5 rounded-lg transition-all"
+           >
+             <XIcon className="w-5 h-5" />
+           </button>
+         </div>
       </div>
       
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-white/40">

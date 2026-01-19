@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ScreenpipeEvent, AIAnalysis } from '../types';
+import { ScreenpipeEvent, AIAnalysis, AIClient } from '../types';
 import { mockTimelineEvents } from '../constants';
 import { LaptopIcon } from '../components/icons';
 import { getEventsByDateRange, checkScreenpipeStatus, getUniqueAppNames } from '../utils/screenpipe';
@@ -21,9 +21,14 @@ import {
   cacheMergedEvents,
   loadCachedMergedEvents,
 } from '../utils/contentMerger';
-import { GoogleGenAI } from '@google/genai';
+import { invoke } from '@tauri-apps/api/core';
 
-export const TimelineView = () => {
+interface TimelineViewProps {
+  ai: AIClient | null;
+  modelName: string;
+}
+
+export const TimelineView = ({ ai, modelName }: TimelineViewProps) => {
   const [events, setEvents] = useState<MergedEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
@@ -80,9 +85,6 @@ export const TimelineView = () => {
 
   // 排序状态：'asc' 正序（旧到新）, 'desc' 倒序（新到旧）
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
-
-  // 初始化 Gemini AI
-  const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY }), []);
 
   // 排序后的事件列表
   const sortedEvents = useMemo(() => {
@@ -247,6 +249,41 @@ export const TimelineView = () => {
     loadEvents();
   };
 
+  // 清理旧视频
+  const [isCleaning, setIsCleaning] = useState(false);
+  
+  const handleCleanVideos = () => {
+    setConfirmDialog({
+      isOpen: true,
+      title: '🗑️ 清理旧视频',
+      message: '确定要删除 1 天前的视频文件吗？\n\n⚠️ 注意：\n• 这将永久删除旧的视频文件\n• OCR 提取的文字数据会保留\n• 不会影响时间线和洞察功能\n• 可以释放磁盘空间',
+      onConfirm: async () => {
+        setConfirmDialog({ ...confirmDialog, isOpen: false });
+        setIsCleaning(true);
+        
+        try {
+          const result = await invoke<string>('clean_old_videos', { daysOld: 1 });
+          
+          setAlertDialog({
+            isOpen: true,
+            title: '✅ 清理完成',
+            message: result,
+            type: 'success',
+          });
+        } catch (error) {
+          setAlertDialog({
+            isOpen: true,
+            title: '❌ 清理失败',
+            message: error as string,
+            type: 'error',
+          });
+        } finally {
+          setIsCleaning(false);
+        }
+      },
+    });
+  };
+
   // 清除所有缓存
   const handleClearCache = () => {
     try {
@@ -376,14 +413,14 @@ export const TimelineView = () => {
       return;
     }
 
-    if (!process.env.API_KEY) {
+    if (!ai) {
       setAlertDialog({
         isOpen: true,
-        title: '未配置 API Key',
-        message: '请在 .env.local 文件中配置 GEMINI_API_KEY',
+        title: '未配置 AI',
+        message: '请在设置中配置 AI API Key',
         type: 'error',
       });
-      console.error('API Key 未配置');
+      console.error('AI 未配置');
       return;
     }
 
@@ -435,6 +472,7 @@ export const TimelineView = () => {
       const results = await analyzeEventsInBatch(
         events,
         ai,
+        modelName,
         (current, total) => {
           console.log(`📊 进度: ${current}/${total}`);
           setAiProgress({ current, total });
@@ -620,6 +658,23 @@ export const TimelineView = () => {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                         </svg>
                         清除缓存
+                    </button>
+
+                    {/* 清理视频按钮 */}
+                    <button 
+                        onClick={handleCleanVideos}
+                        disabled={isCleaning || !isConnected}
+                        className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-purple-50 border border-stone-200 hover:border-purple-200 rounded-xl text-sm font-bold text-stone-600 hover:text-purple-600 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                        title="删除 1 天前的旧视频文件（保留文字数据）"
+                    >
+                        <svg className={`w-4 h-4 ${isCleaning ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            {isCleaning ? (
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            ) : (
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                            )}
+                        </svg>
+                        {isCleaning ? '清理中...' : '清理视频'}
                     </button>
 
                     {/* 刷新按钮 */}
@@ -922,6 +977,8 @@ export const TimelineView = () => {
           onClose={handleCloseModal}
           event={selectedEvent}
           onAnalysisComplete={handleSingleAnalysisComplete}
+          ai={ai}
+          modelName={modelName}
         />
 
         {/* 确认对话框 */}

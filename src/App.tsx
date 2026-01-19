@@ -1,24 +1,28 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
-import { Task, Status, Priority, Subtask, ViewMode, SortMode, ChatMessage } from './types';
+import { Task, Status, Priority, Subtask, ViewMode, SortMode, ChatMessage, AISettings } from './types';
 import { initialTasks, STATUS_LABELS, PRIORITY_LABELS } from './constants';
 import { LayoutGridIcon, ClockIcon, ChartPieIcon, SearchIcon, SparklesIcon, BellIcon, PlusIcon } from './components/icons';
 import { TaskDetailModal } from './components/modals/TaskDetailModal';
 import { RPGDetailModal } from './components/modals/RPGDetailModal';
+import { SuggestionsModal } from './components/modals/SuggestionsModal';
+import { AISettingsModal } from './components/modals/AISettingsModal';
 import { ChatSidebar } from './components/chat/ChatSidebar';
 import { BoardView } from './views/BoardView';
 import { TimelineView } from './views/TimelineView';
 import { InsightsView } from './views/InsightsView';
 import { storage } from './utils/storage';
-import { getRecentEvents, checkScreenpipeStatus } from './utils/screenpipe';
+import { getRecentEvents, checkScreenpipeStatus, getEventsAroundTime } from './utils/screenpipe';
 import { autoMigrate, migrateTaskData } from './utils/dataMigration';
+import { showMigrationStatus, exportLocalStorageData } from './utils/migrationHelper';
+import { loadAISettings, saveAISettings, getModelName } from './utils/aiSettings';
+import { createAIClient } from './utils/aiClient';
+import { embeddingManager } from './utils/embeddingManager';
 
 const App = () => {
-  // 初始化：优先从 localStorage 读取，否则使用默认数据
-  const [tasks, setTasks] = useState<Task[]>(() => {
-    const savedTasks = storage.getTasks();
-    return savedTasks || initialTasks;
-  });
+  // 初始化：优先从数据库读取，否则使用默认数据
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [isLoadingTasks, setIsLoadingTasks] = useState(true);
   
   const [viewMode, setViewMode] = useState<ViewMode>("board");
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -26,6 +30,8 @@ const App = () => {
   const [currentTask, setCurrentTask] = useState<Task | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [isSemanticSearch, setIsSemanticSearch] = useState(false);
+  const [semanticSearchResults, setSemanticSearchResults] = useState<string[]>([]); // 存储相似任务的 ID
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("default");
@@ -35,42 +41,137 @@ const App = () => {
 
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { id: 'welcome', role: 'model', text: '嗨！我是你的可爱助手 🌸。我可以帮你管理任务，比如"帮我创建一个明天截止的高优先级任务"。' }
+    { id: 'welcome', role: 'model', text: '嗨！我是你的可爱助手 🌸\n\n我可以帮你：\n✅ 管理任务（"帮我创建一个明天截止的高优先级任务"）\n🔍 查询活动记录（"我昨天下午做了什么？"、"今天上午我干了啥？"）\n📊 搜索相关任务\n\n随时问我任何问题吧！' }
   ]);
   const [chatStreaming, setChatStreaming] = useState(false);
   
   // Drafts State
   const [showDrafts, setShowDrafts] = useState(false);
-  const [draftSuggestions, setDraftSuggestions] = useState([
-    { id: 1, title: "回复 Slack 关于 API 的讨论", time: "10:15 AM" },
-    { id: 2, title: "更新 README 文档", time: "昨天" },
-    { id: 3, title: "Review 登录页设计稿", time: "13:30 PM" }
-  ]);
+  const [draftSuggestions, setDraftSuggestions] = useState<Array<{ id: number; title: string; time: string }>>([]);
 
   // Screenpipe 连接状态
   const [screenpipeConnected, setScreenpipeConnected] = useState(false);
 
-  const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY }), []);
+  // AI 设置状态
+  const [aiSettings, setAISettings] = useState<AISettings>(() => loadAISettings());
+  const [showAISettings, setShowAISettings] = useState(false);
 
-  // --- 数据迁移（首次加载时执行） ---
+  // 创建 AI 客户端（当设置变化时重新创建）
+  const ai = useMemo(() => {
+    try {
+      if (!aiSettings.apiKey) {
+        console.warn('⚠️ 未配置 AI API Key');
+        return null;
+      }
+      return createAIClient(aiSettings);
+    } catch (error) {
+      console.error('❌ 创建 AI 客户端失败:', error);
+      return null;
+    }
+  }, [aiSettings]);
+
+  // 获取当前使用的模型名称
+  const modelName = useMemo(() => getModelName(aiSettings), [aiSettings]);
+
+  // --- 初始化：从数据库加载任务 ---
   useEffect(() => {
-    autoMigrate();
+    const loadTasks = async () => {
+      try {
+        console.log('🔄 正在从数据库加载任务...');
+        const savedTasks = await storage.getTasks();
+        if (savedTasks && savedTasks.length > 0) {
+          setTasks(savedTasks);
+          console.log(`✅ 已加载 ${savedTasks.length} 个任务`);
+        } else {
+          console.log('ℹ️ 数据库中没有任务，使用默认数据');
+          // 保存默认任务到数据库
+          await storage.saveTasks(initialTasks);
+        }
+      } catch (error) {
+        console.error('❌ 加载任务失败:', error);
+      } finally {
+        setIsLoadingTasks(false);
+      }
+    };
+
+    loadTasks();
     
-    // 暴露重新迁移函数到全局（用于调试）
-    (window as any).forceRemigrate = () => {
-      console.log('🔄 手动触发重新迁移...');
-      migrateTaskData(true);
+    // 暴露调试函数到全局
+    (window as any).forceMigration = async () => {
+      console.log('🔄 手动触发数据迁移...');
+      await storage.forceMigration();
       window.location.reload();
     };
     
-    console.log('💡 提示: 如果数据不正确，可以在控制台运行 forceRemigrate() 重新迁移');
+    (window as any).showMigrationStatus = showMigrationStatus;
+    (window as any).exportBackup = exportLocalStorageData;
+    
+    console.log('💡 数据库迁移完成！可用命令:');
+    console.log('  - showMigrationStatus() - 查看迁移状态');
+    console.log('  - forceMigration() - 重新迁移数据');
+    console.log('  - exportBackup() - 导出备份');
   }, []); // 只在组件挂载时执行一次
 
-  // --- 自动保存到 localStorage ---
+  // --- 自动保存到数据库（防抖） ---
   useEffect(() => {
-    storage.saveTasks(tasks);
-    console.log('✅ 任务已自动保存到本地');
-  }, [tasks]);
+    // 跳过初始加载时的保存
+    if (isLoadingTasks) return;
+    
+    // 使用防抖，避免频繁保存导致数据库锁定
+    const timeoutId = setTimeout(async () => {
+      console.log('💾 准备保存任务到数据库...');
+      const success = await storage.saveTasks(tasks);
+      if (success) {
+        console.log('✅ 任务已自动保存到数据库');
+      } else {
+        console.error('❌ 保存任务失败');
+      }
+    }, 500); // 延迟 500ms，等待连续操作完成
+    
+    return () => clearTimeout(timeoutId); // 清除之前的定时器
+  }, [tasks, isLoadingTasks]);
+
+  // --- 语义搜索 ---
+  useEffect(() => {
+    // 如果不是语义搜索模式或没有搜索词，清空结果
+    if (!isSemanticSearch || !searchQuery.trim()) {
+      setSemanticSearchResults([]);
+      return;
+    }
+
+    const performSemanticSearch = async () => {
+      try {
+        console.log(`🔍 开始语义搜索: "${searchQuery}"`);
+        
+        // 生成搜索词的向量
+        const queryEmbedding = await embeddingManager.getEmbedding(searchQuery);
+        
+        // 找到相似的任务（只搜索有向量的任务）
+        const tasksWithEmbedding = tasks.filter(t => t.embedding && t.embedding.length > 0);
+        const similarTasks = embeddingManager.findSimilar(
+          queryEmbedding,
+          tasksWithEmbedding,
+          50 // 最多返回 50 个结果
+        );
+        
+        // 只保留相似度大于阈值的任务
+        const threshold = 0.25;
+        const filteredResults = similarTasks
+          .filter(t => t.similarity >= threshold)
+          .map(t => t.id);
+        
+        setSemanticSearchResults(filteredResults);
+        console.log(`✨ 语义搜索完成，找到 ${filteredResults.length} 个相关任务`);
+      } catch (error) {
+        console.warn('⚠️ 语义搜索失败:', error);
+        setSemanticSearchResults([]);
+      }
+    };
+
+    // 添加防抖，避免频繁搜索
+    const debounceTimer = setTimeout(performSemanticSearch, 300);
+    return () => clearTimeout(debounceTimer);
+  }, [searchQuery, isSemanticSearch, tasks]);
 
   // --- Screenpipe 连接检测 ---
   useEffect(() => {
@@ -139,11 +240,18 @@ const App = () => {
         .map(e => `[${e.appName}] ${e.windowTitle}: ${e.content.substring(0, 150)}`)
         .join('\n');
 
-      console.log('📡 调用 Gemini API 生成任务建议...');
+      console.log('📡 调用 AI 生成任务建议...');
 
-      // 3. 调用 Gemini 分析
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      // 检查 AI 客户端
+      if (!ai) {
+        console.error('❌ AI 未配置，请在设置中配置 API Key');
+        alert('请先在设置中配置 AI API Key');
+        return;
+      }
+
+      // 3. 调用 AI 分析
+      const response = await ai.generateContent({
+        model: modelName,
         contents: `
 你是一个智能任务识别助手。
 根据用户的屏幕活动日志，识别出潜在的工作任务。
@@ -224,12 +332,53 @@ ${contextText}
       generateAIDraftSuggestions(); // 立即执行一次
       
       // 每小时执行一次
-      const timer = setInterval(generateAIDraftSuggestions, 60 * 60 * 1000);
+      const timer = setInterval(generateAIDraftSuggestions, 4 * 60 * 60 * 1000);
       return () => clearInterval(timer);
     }
   }, [screenpipeConnected, ai]);
 
   // --- CRUD Operations ---
+
+  /**
+   * 为任务生成语义向量
+   * 将任务的标题、描述、标签组合后生成向量
+   */
+  const generateTaskEmbedding = async (task: Task): Promise<number[] | undefined> => {
+    try {
+      // 组合任务的关键信息
+      const taskText = [
+        task.title,
+        task.description,
+        ...task.tags,
+      ].filter(Boolean).join(' ');
+
+      // 如果没有有效文本，跳过
+      if (!taskText.trim()) {
+        return undefined;
+      }
+
+      // 生成向量
+      const embedding = await embeddingManager.getEmbedding(taskText);
+      console.log(`✨ 为任务 "${task.title}" 生成了向量 (${embedding.length} 维)`);
+      return embedding;
+    } catch (error) {
+      console.warn(`⚠️ 为任务 "${task.title}" 生成向量失败:`, error);
+      return undefined;
+    }
+  };
+
+  /**
+   * 为任务异步生成并更新向量（不阻塞 UI）
+   */
+  const updateTaskEmbedding = async (task: Task) => {
+    const embedding = await generateTaskEmbedding(task);
+    if (embedding) {
+      // 静默更新任务的向量
+      setTasks(prev => prev.map(t => 
+        t.id === task.id ? { ...t, embedding } : t
+      ));
+    }
+  };
 
   const addNewTask = (status: Status) => {
     const now = new Date().toISOString();
@@ -248,6 +397,9 @@ ${contextText}
     };
     setTasks([...tasks, newTask]);
     openTaskDetail(newTask);
+    
+    // 异步生成向量（不阻塞 UI）
+    updateTaskEmbedding(newTask);
   };
 
   const createAiTask = (args: { title: string; description?: string; priority?: string; dueDate?: string }) => {
@@ -271,12 +423,23 @@ ${contextText}
         updatedAt: now
     };
     setTasks(prev => [...prev, newTask]);
+    
+    // 异步生成向量
+    updateTaskEmbedding(newTask);
+    
     return newTask;
   };
 
   const updateTask = (updatedTask: Task) => {
     const now = new Date().toISOString();
     const oldTask = tasks.find(t => t.id === updatedTask.id);
+    
+    console.log('📝 更新任务:', {
+      id: updatedTask.id,
+      title: updatedTask.title,
+      oldStatus: oldTask?.status,
+      newStatus: updatedTask.status
+    });
     
     // 自动更新时间戳
     const taskWithTimestamps = {
@@ -285,16 +448,66 @@ ${contextText}
       // 如果状态变为 Done，设置完成时间
       completedAt: updatedTask.status === 'Done' && oldTask?.status !== 'Done'
         ? now
+        : updatedTask.status !== 'Done' && oldTask?.status === 'Done'
+        ? undefined  // 如果从 Done 改为其他状态，清除完成时间
         : updatedTask.completedAt
     };
     
     setTasks(tasks.map(t => t.id === updatedTask.id ? taskWithTimestamps : t));
     setCurrentTask(taskWithTimestamps);
+    
+    // 检查标题、描述或标签是否有变化，如果有则更新向量
+    const contentChanged = oldTask && (
+      oldTask.title !== updatedTask.title ||
+      oldTask.description !== updatedTask.description ||
+      JSON.stringify(oldTask.tags) !== JSON.stringify(updatedTask.tags)
+    );
+    
+    if (contentChanged) {
+      updateTaskEmbedding(taskWithTimestamps);
+    }
+    
+    console.log('✅ 任务状态已保存到 React state');
   };
 
   const deleteTask = (taskId: string) => {
     setTasks(tasks.filter(t => t.id !== taskId));
     if (currentTask?.id === taskId) closeModal();
+  };
+
+  /**
+   * 查找与指定任务相关的任务
+   * 基于向量相似度返回最相关的任务
+   */
+  const findRelatedTasks = (task: Task, limit: number = 5): Task[] => {
+    // 如果当前任务没有向量，返回空
+    if (!task.embedding || task.embedding.length === 0) {
+      return [];
+    }
+
+    // 找到所有有向量的其他任务
+    const otherTasks = tasks.filter(t => 
+      t.id !== task.id && // 排除自己
+      t.embedding && 
+      t.embedding.length > 0
+    );
+
+    // 如果没有其他任务，返回空
+    if (otherTasks.length === 0) {
+      return [];
+    }
+
+    // 使用 embedding manager 找到最相似的任务
+    const similarTasks = embeddingManager.findSimilar(
+      task.embedding,
+      otherTasks,
+      limit
+    );
+
+    // 过滤掉相似度太低的任务（阈值 0.4）
+    return similarTasks
+      .filter(t => t.similarity >= 0.4)
+      .map(({ similarity, ...task }) => task);
   };
 
   const addDraftTask = (title: string, draftId: number) => {
@@ -333,23 +546,54 @@ ${contextText}
   // --- Drag and Drop ---
 
   const handleDragStart = (e: React.DragEvent, taskId: string) => {
+    console.log('🎬 开始拖拽任务:', taskId);
     setDraggedTaskId(taskId);
     e.dataTransfer.effectAllowed = "move";
+    console.log('✅ draggedTaskId 已设置');
+    dragOverLoggedRef.current = false; // 重置日志标志
   };
 
+  const dragOverLoggedRef = useRef(false);
+  
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
+    
+    // 只打印第一次，避免频繁输出
+    if (!dragOverLoggedRef.current) {
+      console.log('✋ DragOver 事件正在触发（允许放置）');
+      dragOverLoggedRef.current = true;
+    }
   };
 
   const handleDrop = (e: React.DragEvent, targetStatus: Status) => {
+    console.log('📍 Drop 事件触发！目标状态:', targetStatus);
     e.preventDefault();
-    if (!draggedTaskId) return;
+    
+    console.log('当前 draggedTaskId:', draggedTaskId);
+    if (!draggedTaskId) {
+      console.warn('⚠️ draggedTaskId 为空，无法完成拖拽');
+      return;
+    }
 
     const task = tasks.find(t => t.id === draggedTaskId);
+    console.log('找到的任务:', task?.title || '未找到');
+    
     if (task && task.status !== targetStatus) {
+      console.log(`🎯 拖拽任务: "${task.title}" 从 "${task.status}" 到 "${targetStatus}"`);
       updateTask({ ...task, status: targetStatus });
+      console.log('✅ 任务状态已更新');
+    } else if (task && task.status === targetStatus) {
+      console.log(`ℹ️ 任务 "${task.title}" 已经在 "${targetStatus}" 列，无需更新`);
+    } else if (!task) {
+      console.error('❌ 未找到任务 ID:', draggedTaskId);
     }
+    setDraggedTaskId(null);
+  };
+
+  const handleDragEnd = () => {
+    console.log('🏁 拖拽结束（dragend 事件）');
+    // 无论拖拽成功与否，都清除拖拽状态
     setDraggedTaskId(null);
   };
 
@@ -384,21 +628,33 @@ ${contextText}
       任务标题: ${currentTask.title}
       原描述: ${currentTask.description}`;
 
-      const response = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
+      // 检查是否支持流式
+      if (ai.generateContentStream) {
+        const stream = ai.generateContentStream({
+          model: modelName,
+          contents: prompt,
+        });
 
-      let fullText = "";
-      for await (const chunk of response) {
-        const text = chunk.text;
-        if (text) {
-          fullText += text;
-          setStreamingContent(prev => prev + text);
+        let fullText = "";
+        for await (const chunk of stream) {
+          const text = chunk.text;
+          if (text) {
+            fullText += text;
+            setStreamingContent(prev => prev + text);
+          }
         }
+        
+        updateTask({ ...currentTask, description: fullText });
+      } else {
+        // 不支持流式，使用普通调用
+        const response = await ai.generateContent({
+          model: modelName,
+          contents: prompt,
+        });
+        
+        setStreamingContent(response.text);
+        updateTask({ ...currentTask, description: response.text });
       }
-      
-      updateTask({ ...currentTask, description: fullText });
     } catch (error) {
       setStreamingContent("AI 休息中...请稍后再试 😴");
     } finally {
@@ -408,6 +664,12 @@ ${contextText}
 
   const handleAIBreakdown = async () => {
     if (!currentTask) return;
+    
+    if (!ai) {
+      alert('请先在设置中配置 AI API Key');
+      return;
+    }
+    
     setAiStreaming(true);
 
     try {
@@ -421,15 +683,26 @@ ${contextText}
       4. 不要包含任何解释性文字，不要前言，不要总结。
       5. 确保每个步骤都是可执行的动作。`;
 
-      const response = await ai.models.generateContentStream({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
-
       let fullText = "";
-      for await (const chunk of response) {
-        const text = chunk.text;
-        if (text) fullText += text;
+      
+      if (ai.generateContentStream) {
+        const stream = ai.generateContentStream({
+          model: modelName,
+          contents: prompt,
+        });
+
+        for await (const chunk of stream) {
+          const text = chunk.text;
+          if (text) {
+            fullText += text;
+          }
+        }
+      } else {
+        const response = await ai.generateContent({
+          model: modelName,
+          contents: prompt,
+        });
+        fullText = response.text;
       }
 
       const lines = fullText.split('\n').filter(line => line.trim().length > 0);
@@ -450,6 +723,14 @@ ${contextText}
 
   // --- AI Project Chat ---
 
+  const handleClearChat = () => {
+    // 重置聊天记录到初始状态，只保留欢迎消息
+    setChatMessages([
+      { id: 'welcome', role: 'model', text: '嗨！我是你的可爱助手 🌸\n\n我可以帮你：\n✅ 管理任务（"帮我创建一个明天截止的高优先级任务"）\n🔍 查询活动记录（"我昨天下午做了什么？"、"今天上午我干了啥？"）\n📊 搜索相关任务\n\n随时问我任何问题吧！' }
+    ]);
+    console.log('🗑️ 聊天记录已清空');
+  };
+
   const handleChatSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!chatInput.trim() || chatStreaming) return;
@@ -463,6 +744,25 @@ ${contextText}
     setChatMessages(prev => [...prev, { id: tempId, role: 'model', text: '' }]);
 
     try {
+      // 🌟 在用户提问时，自动进行语义搜索相关任务
+      let relatedTasksInfo = "";
+      try {
+        const queryEmbedding = await embeddingManager.getEmbedding(userMsg.text);
+        const tasksWithEmbedding = tasks.filter(t => t.embedding && t.embedding.length > 0);
+        const similarTasks = embeddingManager.findSimilar(queryEmbedding, tasksWithEmbedding, 5);
+        
+        if (similarTasks.length > 0 && similarTasks[0].similarity >= 0.3) {
+          relatedTasksInfo = `\n\n🔍 Based on semantic search, I found these related tasks:\n${
+            similarTasks
+              .filter(t => t.similarity >= 0.3)
+              .map((t, i) => `${i + 1}. "${t.title}" (${t.status}, ${t.priority} priority)${t.description ? ` - ${t.description.substring(0, 50)}...` : ''}`)
+              .join('\n')
+          }`;
+        }
+      } catch (error) {
+        console.warn('语义搜索失败，继续正常对话:', error);
+      }
+
       // Define Tools
       const createTaskTool: FunctionDeclaration = {
         name: "createTask",
@@ -476,6 +776,25 @@ ${contextText}
                 dueDate: { type: Type.STRING, description: "Due date in YYYY-MM-DD format" }
             },
             required: ["title"]
+        }
+      };
+
+      const queryTimelineTool: FunctionDeclaration = {
+        name: "queryTimeline",
+        description: "MUST USE THIS TOOL when user asks about their past activities or what they were doing. Query the user's activity timeline from Screenpipe to get actual activity data (apps used, windows opened, content). DO NOT guess or say you don't know - always call this tool for activity questions. Supports any date/time: '今天下午', '昨天3点', '2025年12月10日', '上午', etc.",
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                timeDescription: { 
+                  type: Type.STRING, 
+                  description: "Natural language time/date description in Chinese. Examples: '今天下午6点', '昨天下午', '2025年12月10日上午', '3天前', '上午', '今天下午'" 
+                },
+                minutesRange: { 
+                  type: Type.NUMBER, 
+                  description: "Search range in minutes (±). Use 30-60 for specific times ('3点'), 120-240 for broader periods ('下午', '昨天'). Default: 30" 
+                }
+            },
+            required: ["timeDescription"]
         }
       };
 
@@ -494,11 +813,31 @@ ${contextText}
       You are a cheerful, cute, and helpful project assistant in a pastel-themed app.
       Current Date: ${today}
       Current Project State: ${projectContext}
+      ${relatedTasksInfo}
+      
+      IMPORTANT - YOUR CAPABILITIES:
+      1. Task Management: You can create tasks using the createTask tool
+      2. Timeline Query: You HAVE ACCESS to the user's activity timeline via Screenpipe
+      
+      WHEN USER ASKS ABOUT THEIR ACTIVITIES (what they did, what they were doing at a specific time):
+      - YOU MUST call the queryTimeline tool to get their actual activity data
+      - Examples that REQUIRE queryTimeline:
+        * "我今天下午做了什么？" → call queryTimeline("今天下午", 120)
+        * "我昨天3点在做什么？" → call queryTimeline("昨天下午3点", 30)
+        * "我上午干了啥？" → call queryTimeline("上午", 180)
+        * "2025年12月10日我做了什么？" → call queryTimeline("2025年12月10日", 240)
+      
+      - NEVER say "我无法知道" or "我没有办法知道" when asked about activities
+      - ALWAYS use queryTimeline to answer activity-related questions
+      - For broad time periods (like "昨天" or "上午"), use minutesRange: 120-240
+      - For specific times (like "下午3点"), use minutesRange: 30-60
       
       Context Memory:
-      - Remember the user's previous requests from the conversation history.
-      - If the user refers to "those tasks" or "the task I just added", look at the project state or history.
-      - Always answer in Chinese. Use emojis occasionally.
+      - Remember the user's previous requests from the conversation history
+      - If the user refers to "those tasks" or "the task I just added", look at the project state or history
+      - When I provide related tasks from semantic search, mention them naturally if relevant
+      
+      - Always answer in Chinese. Use emojis occasionally to be friendly and cute.
       `;
 
       // Construct History for API
@@ -509,55 +848,204 @@ ${contextText}
 
       const currentContent = { role: 'user', parts: [{ text: userMsg.text }] };
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const response = await ai.generateContent({
+        model: modelName,
         contents: [...historyContent, currentContent],
         config: {
-            tools: [{ functionDeclarations: [createTaskTool] }],
+            tools: [{ functionDeclarations: [createTaskTool, queryTimelineTool] }],
             systemInstruction: systemInstruction
         }
       });
 
-      const calls = response.functionCalls;
+      const calls = (response as any).functionCalls;
+      
+      console.log('🤖 AI Response:', {
+        hasText: !!response.text,
+        hasFunctionCalls: !!calls,
+        functionCallsCount: calls?.length || 0,
+        functionNames: calls?.map((c: any) => c.name) || []
+      });
 
       if (calls && calls.length > 0) {
+          console.log('🔧 Function Calls Detected:', calls.map((c: any) => ({ name: c.name, args: c.args })));
           // Handle Multiple Function Calls
           const newTasksCreated: any[] = [];
+          let timelineResults: string = "";
           
           for (const call of calls) {
               if (call.name === "createTask") {
                   const args = call.args as any;
                   const newTask = createAiTask(args);
                   newTasksCreated.push(newTask);
+              } else if (call.name === "queryTimeline") {
+                  const args = call.args as any;
+                  
+                  // 解析时间描述
+                  const timeDesc = args.timeDescription || "";
+                  const minutesRange = args.minutesRange || 30;
+                  
+                  // 🌟 增强的时间解析器
+                  let targetTime = new Date();
+                  
+                  // 1. 解析相对日期
+                  if (timeDesc.includes('昨天')) {
+                    targetTime.setDate(targetTime.getDate() - 1);
+                  } else if (timeDesc.includes('前天')) {
+                    targetTime.setDate(targetTime.getDate() - 2);
+                  } else if (timeDesc.includes('大前天')) {
+                    targetTime.setDate(targetTime.getDate() - 3);
+                  } else if (timeDesc.match(/(\d+)天前/)) {
+                    const daysAgo = parseInt(timeDesc.match(/(\d+)天前/)![1]);
+                    targetTime.setDate(targetTime.getDate() - daysAgo);
+                  } else if (timeDesc.includes('上周') || timeDesc.includes('上星期')) {
+                    targetTime.setDate(targetTime.getDate() - 7);
+                  }
+                  
+                  // 2. 解析绝对日期（YYYY年MM月DD日 或 YYYY-MM-DD）
+                  const absoluteDateMatch = timeDesc.match(/(\d{4})年?[/-]?(\d{1,2})月?[/-]?(\d{1,2})[日号]?/);
+                  if (absoluteDateMatch) {
+                    const year = parseInt(absoluteDateMatch[1]);
+                    const month = parseInt(absoluteDateMatch[2]) - 1; // JS月份从0开始
+                    const day = parseInt(absoluteDateMatch[3]);
+                    targetTime = new Date(year, month, day);
+                  } else {
+                    // 只有月日（MM月DD日）
+                    const monthDayMatch = timeDesc.match(/(\d{1,2})月(\d{1,2})[日号]/);
+                    if (monthDayMatch) {
+                      const month = parseInt(monthDayMatch[1]) - 1;
+                      const day = parseInt(monthDayMatch[2]);
+                      targetTime.setMonth(month);
+                      targetTime.setDate(day);
+                    }
+                  }
+                  
+                  // 3. 解析具体时间（点数）
+                  const hourMatch = timeDesc.match(/(\d{1,2})[点:](\d{0,2})?/);
+                  if (hourMatch) {
+                    let hour = parseInt(hourMatch[1]);
+                    const minute = hourMatch[2] ? parseInt(hourMatch[2]) : 0;
+                    
+                    // 处理上午/下午
+                    if (timeDesc.includes('下午') || timeDesc.includes('pm')) {
+                      if (hour < 12) hour += 12;
+                    } else if (timeDesc.includes('上午') || timeDesc.includes('am')) {
+                      if (hour === 12) hour = 0;
+                    } else if (timeDesc.includes('晚上') || timeDesc.includes('夜里')) {
+                      if (hour < 12) hour += 12;
+                      if (hour < 18) hour += 12; // 晚上至少是18点以后
+                    } else if (timeDesc.includes('早上') || timeDesc.includes('早晨')) {
+                      if (hour > 12) hour -= 12;
+                      if (hour < 5) hour += 12; // 早上至少是5点以后
+                    } else if (timeDesc.includes('中午')) {
+                      if (hour < 11 || hour > 13) hour = 12;
+                    }
+                    
+                    targetTime.setHours(hour, minute, 0, 0);
+                  } else {
+                    // 4. 如果只提到时间段，使用中间时间
+                    if (timeDesc.includes('上午')) {
+                      targetTime.setHours(10, 0, 0, 0); // 上午10点
+                    } else if (timeDesc.includes('下午')) {
+                      targetTime.setHours(15, 0, 0, 0); // 下午3点
+                    } else if (timeDesc.includes('早上') || timeDesc.includes('早晨')) {
+                      targetTime.setHours(8, 0, 0, 0); // 早上8点
+                    } else if (timeDesc.includes('中午')) {
+                      targetTime.setHours(12, 0, 0, 0); // 中午12点
+                    } else if (timeDesc.includes('晚上') || timeDesc.includes('夜里')) {
+                      targetTime.setHours(20, 0, 0, 0); // 晚上8点
+                    }
+                  }
+                  
+                  console.log(`🔍 查询时间线: "${timeDesc}", 解析为: ${targetTime.toLocaleString('zh-CN')}`);
+                  
+                  // 获取该时间段的事件
+                  try {
+                    const events = await getEventsAroundTime(targetTime, minutesRange);
+                    
+                    if (events.length > 0) {
+                      // 按时间排序
+                      events.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                      
+                      // 智能摘要：如果事件很多，按应用分组统计
+                      if (events.length > 20) {
+                        // 统计各应用的使用情况
+                        const appStats = events.reduce((acc: any, e) => {
+                          if (!acc[e.appName]) {
+                            acc[e.appName] = { count: 0, windows: new Set() };
+                          }
+                          acc[e.appName].count++;
+                          acc[e.appName].windows.add(e.windowTitle);
+                          return acc;
+                        }, {});
+                        
+                        const appSummary = Object.entries(appStats)
+                          .sort((a: any, b: any) => b[1].count - a[1].count)
+                          .slice(0, 5)
+                          .map(([app, stats]: [string, any]) => 
+                            `  • ${app} (${stats.count}次活动, ${stats.windows.size}个窗口)`
+                          )
+                          .join('\n');
+                        
+                        // 显示时间范围
+                        const firstTime = new Date(events[0].timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                        const lastTime = new Date(events[events.length - 1].timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                        
+                        timelineResults = `\n📅 查询到 ${events.length} 条活动记录（${firstTime} - ${lastTime}）:\n\n主要应用:\n${appSummary}`;
+                      } else {
+                        // 事件较少，详细列出
+                        const eventsSummary = events.slice(0, 10).map(e => {
+                          const time = new Date(e.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+                          return `[${time}] ${e.appName}: ${e.windowTitle}${e.content ? ` - ${e.content.substring(0, 80)}` : ''}`;
+                        }).join('\n');
+                        
+                        timelineResults = `\n📅 查询到 ${events.length} 条活动记录（${timeDesc}）:\n${eventsSummary}${events.length > 10 ? '\n... 还有更多记录' : ''}`;
+                      }
+                    } else {
+                      timelineResults = `\n⚠️ 没有找到该时间段的活动记录。\n可能原因：\n  • Screenpipe 没有运行\n  • 该时间段没有活动数据\n  • 日期解析错误（当前解析为: ${targetTime.toLocaleString('zh-CN')}）`;
+                    }
+                  } catch (error) {
+                    console.error('查询时间线失败:', error);
+                    timelineResults = `\n❌ 查询时间线失败: ${error}\n请确保 Screenpipe 正在运行。`;
+                  }
               }
           }
           
-          // Generate Follow-up Confirmation
-          const followUpPrompt = `
-          ${systemInstruction}
+          // Generate Follow-up Response
+          let followUpPrompt = systemInstruction;
           
-          SYSTEM NOTIFICATION:
-          The following tasks have JUST been successfully created in the system based on the user's request:
-          ${JSON.stringify(newTasksCreated.map(t => t.title))}
+          if (newTasksCreated.length > 0) {
+            followUpPrompt += `\n\nSYSTEM NOTIFICATION:\nThe following tasks have been created: ${JSON.stringify(newTasksCreated.map(t => t.title))}\nConfirm this to the user enthusiastically!`;
+          }
           
-          INSTRUCTION:
-          Reply to the user confirming these specific tasks were created. Be enthusiastic!
-          `;
+          if (timelineResults) {
+            followUpPrompt += `\n\nTIMELINE QUERY RESULTS:${timelineResults}\n\nPlease summarize these activities for the user in a friendly way. Mention the most important apps and activities.`;
+          }
           
-          const response2 = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [{ role: 'user', parts: [{ text: "Please confirm the tasks creation." }] }],
+          const response2 = await ai.generateContent({
+            model: modelName,
+            contents: [{ role: 'user', parts: [{ text: userMsg.text }] }],
             config: { systemInstruction: followUpPrompt }
           });
           
           setChatMessages(prev => prev.map(msg => 
-            msg.id === tempId ? { ...msg, text: response2.text || "✅ 任务已创建！" } : msg
+            msg.id === tempId ? { ...msg, text: response2.text || "✅ 完成！" } : msg
           ));
 
       } else {
-          // Normal chat response
+          // Normal chat response (no function calls)
+          let responseText = response.text || "抱歉，我没有听懂...";
+          
+          // 检测是否是活动查询但AI没有调用工具
+          const isActivityQuery = /做了?什么|干了?什么|在做什么|在干什么|活动|时间线/.test(userMsg.text);
+          if (isActivityQuery && !screenpipeConnected) {
+            responseText += "\n\n💡 提示：要查询活动记录，需要先启动 Screenpipe 哦！";
+          } else if (isActivityQuery) {
+            console.warn('⚠️ AI 没有调用 queryTimeline 工具，但用户似乎在问活动相关的问题');
+            responseText += "\n\n🔧 调试信息：如果你想查询活动记录，请确保 Screenpipe 正在运行。";
+          }
+          
           setChatMessages(prev => prev.map(msg => 
-            msg.id === tempId ? { ...msg, text: response.text || "抱歉，我没有听懂..." } : msg
+            msg.id === tempId ? { ...msg, text: responseText } : msg
           ));
       }
 
@@ -573,24 +1061,46 @@ ${contextText}
 
   // --- Filter and Sort Tasks ---
   const processedTasks = useMemo(() => {
-    let result = tasks.filter(t => 
-        t.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-        t.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        t.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
-    );
+    let result = tasks;
 
-    if (sortMode === 'priority') {
+    // 如果有搜索关键词
+    if (searchQuery.trim()) {
+      if (isSemanticSearch && semanticSearchResults.length > 0) {
+        // 🌟 语义搜索模式：使用预计算的结果
+        const resultIds = new Set(semanticSearchResults);
+        result = tasks.filter(t => resultIds.has(t.id));
+        
+        // 按相似度顺序排列（semanticSearchResults 已经按相似度排序）
+        result.sort((a, b) => {
+          return semanticSearchResults.indexOf(a.id) - semanticSearchResults.indexOf(b.id);
+        });
+      } else if (!isSemanticSearch) {
+        // 传统关键词搜索
+        result = tasks.filter(t => 
+          t.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+          t.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          t.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()))
+        );
+      }
+      // 如果是语义搜索但还没有结果，显示空列表（等待搜索完成）
+    }
+
+    // 应用排序（语义搜索时不额外排序，因为已经按相似度排序）
+    if (!isSemanticSearch || !searchQuery.trim()) {
+      if (sortMode === 'priority') {
         const priorityWeight = { High: 3, Medium: 2, Low: 1 };
         result.sort((a, b) => priorityWeight[b.priority] - priorityWeight[a.priority]);
-    } else if (sortMode === 'date') {
+      } else if (sortMode === 'date') {
         result.sort((a, b) => {
-            if (!a.dueDate) return 1;
-            if (!b.dueDate) return -1;
-            return a.dueDate.localeCompare(b.dueDate);
+          if (!a.dueDate) return 1;
+          if (!b.dueDate) return -1;
+          return a.dueDate.localeCompare(b.dueDate);
         });
+      }
     }
+    
     return result;
-  }, [tasks, searchQuery, sortMode]);
+  }, [tasks, searchQuery, sortMode, isSemanticSearch, semanticSearchResults]);
 
   return (
     <div className="fixed inset-0 flex flex-col font-sans overflow-hidden bg-gradient-to-br from-rose-50 via-white to-amber-50">
@@ -629,99 +1139,59 @@ ${contextText}
            </div>
         </div>
 
-        {/* Drafts Button - Only Show in Board View */}
-        {viewMode === 'board' && draftSuggestions.length > 0 && (
-            <div className="relative">
-                <button 
-                    onClick={() => setShowDrafts(!showDrafts)}
-                    className="flex items-center gap-2 px-3 py-2 bg-white/80 hover:bg-white border border-stone-200 text-stone-600 text-xs font-bold rounded-xl transition-all shadow-sm group"
-                >
-                    <BellIcon className="w-4 h-4 text-rose-400 group-hover:animate-swing" />
-                    <span className="hidden sm:inline">{draftSuggestions.length} 条建议</span>
-                    <span className="w-2 h-2 bg-rose-500 rounded-full absolute top-2 right-2 animate-pulse"></span>
-                </button>
-                
-                {/* Mock Drafts Popover */}
-                {showDrafts && (
-                    <div className="absolute top-full right-0 mt-3 w-80 bg-white rounded-2xl shadow-xl border border-stone-100 p-4 z-50 animate-in slide-in-from-top-2">
-                        <div className="flex justify-between items-center mb-3">
-                            <h4 className="text-xs font-bold text-stone-400 uppercase tracking-wider">AI 发现的任务</h4>
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    generateAIDraftSuggestions();
-                                }}
-                                disabled={isGeneratingSuggestions || !screenpipeConnected}
-                                className={`
-                                    text-xs font-bold px-2 py-1 rounded-lg transition-all
-                                    ${isGeneratingSuggestions 
-                                        ? 'bg-stone-100 text-stone-400 cursor-not-allowed' 
-                                        : screenpipeConnected
-                                        ? 'bg-rose-50 text-rose-600 hover:bg-rose-100'
-                                        : 'bg-stone-100 text-stone-400 cursor-not-allowed'
-                                    }
-                                `}
-                                title={!screenpipeConnected ? 'Screenpipe 未连接' : '重新生成建议'}
-                            >
-                                {isGeneratingSuggestions ? '生成中...' : '🔄 重新生成'}
-                            </button>
-                        </div>
-                        
-                        {!screenpipeConnected && (
-                            <div className="mb-3 p-2 bg-yellow-50 border border-yellow-100 rounded-lg">
-                                <p className="text-xs text-yellow-700">
-                                    ⚠️ Screenpipe 未连接，无法生成任务建议
-                                </p>
-                            </div>
-                        )}
-                        
-                        {draftSuggestions.length > 0 ? (
-                            <div className="space-y-2">
-                                {draftSuggestions.map((d) => (
-                                    <div key={d.id} className="p-3 bg-stone-50 hover:bg-rose-50 rounded-xl border border-stone-100 hover:border-rose-100 transition-colors group">
-                                        <div className="flex justify-between items-start">
-                                            <p className="text-sm font-bold text-stone-700 group-hover:text-rose-700 flex-1 pr-2">{d.title}</p>
-                                            <button 
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    addDraftTask(d.title, d.id);
-                                                }}
-                                                className="text-stone-300 hover:text-emerald-500 transition-colors flex-shrink-0"
-                                                title="添加到待办"
-                                            >
-                                                <PlusIcon className="w-4 h-4" />
-                                            </button>
-                                        </div>
-                                        <p className="text-[10px] text-stone-400 mt-1">来源: Screenpipe • {d.time}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="text-center py-6">
-                                <p className="text-sm text-stone-400 mb-2">暂无建议任务 ✨</p>
-                                {screenpipeConnected && (
-                                    <p className="text-xs text-stone-400">
-                                        点击"重新生成"按钮，AI 将分析您最近的活动并提供任务建议
-                                    </p>
-                                )}
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-        )}
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2">
+          {/* AI Settings Button */}
+          <button 
+              onClick={() => setShowAISettings(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-white/80 hover:bg-white border border-stone-200 text-stone-600 text-xs font-bold rounded-xl transition-all shadow-sm hover:shadow-md hover:border-blue-300"
+              title="AI 设置"
+          >
+              <span className="text-blue-500">🤖</span>
+              <span className="hidden lg:inline">AI</span>
+          </button>
+
+          {/* Drafts Button - Only Show in Board View */}
+          {viewMode === 'board' && (
+              <button 
+                  onClick={() => setShowDrafts(true)}
+                  className="flex items-center gap-2 px-3 py-2 bg-white/80 hover:bg-white border border-stone-200 text-stone-600 text-xs font-bold rounded-xl transition-all shadow-sm group hover:shadow-md hover:border-rose-300 relative"
+              >
+                  <BellIcon className="w-4 h-4 text-rose-400 group-hover:animate-swing" />
+                  <span className="hidden sm:inline">{draftSuggestions.length} 条建议</span>
+                  {draftSuggestions.length > 0 && (
+                      <span className="w-2 h-2 bg-rose-500 rounded-full absolute top-2 right-2 animate-pulse"></span>
+                  )}
+              </button>
+          )}
+        </div>
 
         <div className="flex items-center gap-3 hidden sm:flex">
           {viewMode === 'board' && (
-              <div className="relative group">
-                <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-400 group-focus-within:text-rose-500 transition-colors" />
-                <input 
-                    type="text"
-                    placeholder="搜索..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-40 bg-white border border-stone-200 rounded-xl py-2 pl-9 pr-3 text-xs font-semibold focus:ring-2 focus:ring-rose-100 focus:border-rose-200 outline-none transition-all"
-                />
+              <div className="flex items-center gap-2">
+                <div className="relative group">
+                  <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-stone-400 group-focus-within:text-rose-500 transition-colors" />
+                  <input 
+                      type="text"
+                      placeholder={isSemanticSearch ? "语义搜索..." : "搜索..."}
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="w-40 bg-white border border-stone-200 rounded-xl py-2 pl-9 pr-3 text-xs font-semibold focus:ring-2 focus:ring-rose-100 focus:border-rose-200 outline-none transition-all"
+                  />
+                </div>
+                <button
+                  onClick={() => setIsSemanticSearch(!isSemanticSearch)}
+                  className={`
+                    px-2 py-2 rounded-lg text-xs font-bold transition-all
+                    ${isSemanticSearch 
+                      ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-md' 
+                      : 'bg-stone-100 text-stone-500 hover:bg-stone-200'
+                    }
+                  `}
+                  title={isSemanticSearch ? "切换到关键词搜索" : "切换到语义搜索（AI 理解语义）"}
+                >
+                  ✨
+                </button>
               </div>
           )}
           <button 
@@ -750,14 +1220,15 @@ ${contextText}
                   onDragStart={handleDragStart}
                   onDragOver={handleDragOver}
                   onDrop={handleDrop}
+                  onDragEnd={handleDragEnd}
                   onAddTask={addNewTask}
                   onTaskClick={openTaskDetail}
                 />
             )}
             
-            {viewMode === 'timeline' && <TimelineView />}
+            {viewMode === 'timeline' && <TimelineView ai={ai} modelName={modelName} />}
             
-            {viewMode === 'insights' && <InsightsView onOpenRPGDetail={() => setIsRPGModalOpen(true)} />}
+            {viewMode === 'insights' && <InsightsView onOpenRPGDetail={() => setIsRPGModalOpen(true)} ai={ai} modelName={modelName} />}
         </main>
 
         {/* Chat Sidebar */}
@@ -770,6 +1241,7 @@ ${contextText}
           onInputChange={setChatInput}
           onSubmit={handleChatSubmit}
           onQuickQuestion={(q) => setChatInput(q)}
+          onClearChat={handleClearChat}
         />
       </div>
 
@@ -780,9 +1252,11 @@ ${contextText}
         tagInput={tagInput}
         aiStreaming={aiStreaming}
         streamingContent={streamingContent}
+        relatedTasks={currentTask ? findRelatedTasks(currentTask, 3) : []}
         onClose={closeModal}
         onUpdateTask={updateTask}
         onDeleteTask={deleteTask}
+        onTaskClick={openTaskDetail}
         onTagInputChange={setTagInput}
         onAddTag={handleAddTag}
         onRemoveTag={removeTag}
@@ -794,6 +1268,28 @@ ${contextText}
       <RPGDetailModal
         isOpen={isRPGModalOpen}
         onClose={() => setIsRPGModalOpen(false)}
+      />
+
+      {/* AI Suggestions Modal */}
+      <SuggestionsModal
+        isOpen={showDrafts}
+        onClose={() => setShowDrafts(false)}
+        suggestions={draftSuggestions}
+        onAddTask={addDraftTask}
+        onRefresh={generateAIDraftSuggestions}
+        isRefreshing={isGeneratingSuggestions}
+        isConnected={screenpipeConnected}
+      />
+
+      {/* AI Settings Modal */}
+      <AISettingsModal
+        isOpen={showAISettings}
+        onClose={() => setShowAISettings(false)}
+        settings={aiSettings}
+        onSave={(newSettings) => {
+          setAISettings(newSettings);
+          saveAISettings(newSettings);
+        }}
       />
     </div>
   );

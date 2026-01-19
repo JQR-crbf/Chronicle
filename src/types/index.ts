@@ -25,6 +25,8 @@ export interface Task {
   createdAt: string;      // 创建时间 (ISO 8601 格式)
   updatedAt: string;      // 最后更新时间
   completedAt?: string;   // 完成时间 (仅 status 为 'Done' 时有值)
+  // AI 语义搜索字段
+  embedding?: number[];   // 任务的向量表示（用于语义搜索）
 }
 
 export interface ChatMessage {
@@ -91,3 +93,17 @@ export interface RPGDetails {
   skills: RPGSkill[];
 }
 
+// --- AI Provider Types ---
+
+export type AIProvider = 'gemini' | 'openrouter';
+
+export interface AISettings {
+  provider: AIProvider;
+  apiKey: string;
+  model?: string; // 可选：自定义模型名称
+}
+
+export interface AIClient {
+  generateContent: (params: { model: string; contents: any; config?: any }) => Promise<any>;
+  generateContentStream?: (params: { model: string; contents: any }) => AsyncGenerator<{ text: string }>;
+}

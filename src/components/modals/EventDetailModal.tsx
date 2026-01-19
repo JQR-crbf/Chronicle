@@ -1,25 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { Modal } from '../common/Modal';
-import { ScreenpipeEvent, AIAnalysis } from '../../types';
+import { ScreenpipeEvent, AIAnalysis, AIClient } from '../../types';
 import { MergedEvent } from '../../utils/contentMerger';
 import { analyzeEventWithAI } from '../../utils/aiAnalyzer';
-import { GoogleGenAI } from '@google/genai';
 
 interface EventDetailModalProps {
   isOpen: boolean;
   onClose: () => void;
   event: (ScreenpipeEvent | MergedEvent) | null;
   onAnalysisComplete?: (eventId: string, analysis: AIAnalysis) => void;
+  ai: AIClient | null;
+  modelName: string;
 }
 
-export const EventDetailModal = ({ isOpen, onClose, event, onAnalysisComplete }: EventDetailModalProps) => {
+export const EventDetailModal = ({ isOpen, onClose, event, onAnalysisComplete, ai, modelName }: EventDetailModalProps) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [localAnalysis, setLocalAnalysis] = useState<AIAnalysis | undefined>(undefined);
   const [showCopiedToast, setShowCopiedToast] = useState(false);
   const [showMergedDetails, setShowMergedDetails] = useState(false);
-
-  // 初始化 AI 客户端
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
 
   // 当事件变化时，更新本地分析结果
   useEffect(() => {
@@ -37,8 +35,8 @@ export const EventDetailModal = ({ isOpen, onClose, event, onAnalysisComplete }:
   const handleAnalyze = async () => {
     if (!event || isAnalyzing) return;
 
-    if (!process.env.API_KEY) {
-      alert('未配置 API Key\n\n请在 .env 文件中配置 GEMINI_API_KEY');
+    if (!ai) {
+      alert('未配置 AI\n\n请在设置中配置 AI API Key');
       return;
     }
 
@@ -46,7 +44,7 @@ export const EventDetailModal = ({ isOpen, onClose, event, onAnalysisComplete }:
     setIsAnalyzing(true);
 
     try {
-      const analysis = await analyzeEventWithAI(event, ai);
+      const analysis = await analyzeEventWithAI(event, ai, modelName);
       console.log('✅ 分析完成:', analysis);
       
       // 更新本地状态

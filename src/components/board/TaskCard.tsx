@@ -8,15 +8,61 @@ interface TaskCardProps {
   task: Task;
   isDragging: boolean;
   onDragStart: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
   onClick: () => void;
 }
 
-export const TaskCard = ({ task, isDragging, onDragStart, onClick }: TaskCardProps) => {
+export const TaskCard = ({ task, isDragging, onDragStart, onDragEnd, onDragOver, onDrop, onClick }: TaskCardProps) => {
+  const [isDraggingLocal, setIsDraggingLocal] = React.useState(false);
+
+  const handleDragStart = (e: React.DragEvent) => {
+    console.log('🎬 TaskCard: dragstart 事件触发, 任务:', task.title);
+    setIsDraggingLocal(true);
+    onDragStart(e);
+  };
+
+  const handleDragEnd = () => {
+    console.log('🏁 TaskCard: dragend 事件触发, 任务:', task.title);
+    setIsDraggingLocal(false);
+    onDragEnd();
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    console.log('👋 TaskCard: dragover 事件触发！任务:', task.title);
+    if (onDragOver) {
+      onDragOver(e);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    console.log('📥 TaskCard: drop 事件触发！任务:', task.title);
+    if (onDrop) {
+      onDrop(e);
+    }
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    // 如果刚刚拖拽过，不触发点击
+    if (isDraggingLocal) {
+      console.log('⏭️ TaskCard: 跳过 click（刚刚拖拽过）');
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    console.log('👆 TaskCard: click 事件触发');
+    onClick();
+  };
+
   return (
     <div
       draggable
-      onDragStart={onDragStart}
-      onClick={onClick}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      onClick={handleClick}
       className={`
         hover-lift
         group bg-white/90 p-4 rounded-2xl border border-white/60 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.05)] cursor-grab active:cursor-grabbing 
