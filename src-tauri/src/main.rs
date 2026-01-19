@@ -4,6 +4,7 @@
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
+use regex::Regex;
 
 #[derive(Serialize, Deserialize)]
 struct GitHubFileRequest {
@@ -75,8 +76,34 @@ fn clean_old_videos(days_old: u64) -> Result<String, String> {
     ))
 }
 
+/// 清理 Markdown 内容，移除多余的代码块包裹
+fn clean_markdown_content(content: &str) -> String {
+    let mut cleaned = content.to_string();
+    
+    // 移除开头的 ```markdown 或 ```
+    let re_start_markdown = Regex::new(r"^```markdown\s*\n").unwrap();
+    let re_start = Regex::new(r"^```\s*\n").unwrap();
+    cleaned = re_start_markdown.replace(&cleaned, "").to_string();
+    cleaned = re_start.replace(&cleaned, "").to_string();
+    
+    // 移除结尾的 ```
+    let re_end = Regex::new(r"\n```\s*$").unwrap();
+    cleaned = re_end.replace(&cleaned, "").to_string();
+    
+    // 确保文件以换行符结尾
+    if !cleaned.ends_with('\n') {
+        cleaned.push('\n');
+    }
+    
+    cleaned.trim().to_string() + "\n"
+}
+
 #[tauri::command]
 fn push_daily_report(date: String, content: String, github_pat: String, member_id: String, team_dir: String) -> Result<String, String> {
+    // 清理 Markdown 格式（移除多余的代码块包裹）
+    let cleaned_content = clean_markdown_content(&content);
+    println!("✅ 已清理 Markdown 格式");
+    
     // 使用用户配置的路径或默认路径
     let report_dir = get_report_dir()?;
     
@@ -91,7 +118,7 @@ fn push_daily_report(date: String, content: String, github_pat: String, member_i
     let date_formatted = date.replace("-", ".");
     let report_file = report_dir.join(format!("{}.md", date_formatted));
     
-    fs::write(&report_file, &content)
+    fs::write(&report_file, &cleaned_content)
         .map_err(|e| format!("保存日报文件失败: {}", e))?;
     
     println!("✅ 日报已保存到: {:?}", report_file);
@@ -125,10 +152,10 @@ fn push_daily_report(date: String, content: String, github_pat: String, member_i
         Err(e) => println!("ℹ️ 文件不存在，将创建新文件: {}", e),
     }
     
-    // Base64 编码内容
+    // Base64 编码内容（使用清理后的内容）
     let content_base64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        content.as_bytes()
+        cleaned_content.as_bytes()
     );
     
     // 构建请求体

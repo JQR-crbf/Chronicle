@@ -41,7 +41,6 @@ const DEFAULT_PROMPTS = {
 
 ### 结构（使用 Markdown）
 
-\`\`\`markdown
 # 📅 工作日报 - {date}
 
 ## 📊 工作概览
@@ -109,7 +108,6 @@ const DEFAULT_PROMPTS = {
 
 ---
 *报告生成时间：${new Date().toLocaleString('zh-CN')}*
-\`\`\`
 
 ## 内容要求
 

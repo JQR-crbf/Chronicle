@@ -1,6 +1,24 @@
 import requests, base64, os, datetime, pathlib
+import re
 
 REPO = "AIEC-Team/AIEC-agent-hub"
+
+def clean_markdown_content(content):
+    """
+    清理 Markdown 内容，移除多余的代码块包裹
+    """
+    # 移除开头的 ```markdown 或 ```
+    content = re.sub(r'^```markdown\s*\n', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^```\s*\n', '', content, flags=re.MULTILINE)
+    
+    # 移除结尾的 ```
+    content = re.sub(r'\n```\s*$', '', content, flags=re.MULTILINE)
+    
+    # 确保文件以换行符结尾
+    if not content.endswith('\n'):
+        content += '\n'
+    
+    return content.strip() + '\n'
 
 def push_log(member_id, team_dir, date, content):
     token = os.environ.get("GITHUB_PAT_TEAM_HUB", "").strip()
@@ -58,6 +76,10 @@ if __name__ == "__main__":
             raise SystemExit(f"本地日报文件不存在: {local_md}")
 
     content = local_md.read_text(encoding="utf-8")
+    
+    # 清理 Markdown 格式（移除多余的代码块包裹）
+    content = clean_markdown_content(content)
+    print(f"✅ 已清理 Markdown 格式")
 
     resp = push_log(member_id, team_dir, date, content)
 
