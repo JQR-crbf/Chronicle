@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { GoogleGenAI, FunctionDeclaration, Type } from "@google/genai";
+import { invoke } from '@tauri-apps/api/core';
 import { Task, Status, Priority, Subtask, ViewMode, SortMode, ChatMessage, AISettings } from './types';
 import { initialTasks, STATUS_LABELS, PRIORITY_LABELS } from './constants';
 import { LayoutGridIcon, ClockIcon, ChartPieIcon, SearchIcon, SparklesIcon, BellIcon, PlusIcon } from './components/icons';
@@ -18,6 +19,7 @@ import { showMigrationStatus, exportLocalStorageData } from './utils/migrationHe
 import { loadAISettings, saveAISettings, getModelName } from './utils/aiSettings';
 import { createAIClient } from './utils/aiClient';
 import { embeddingManager } from './utils/embeddingManager';
+import { loadGitHubConfig } from './utils/githubConfig';
 
 const App = () => {
   // 初始化：优先从数据库读取，否则使用默认数据
@@ -99,7 +101,7 @@ const App = () => {
     // 暴露调试函数到全局
     (window as any).forceMigration = async () => {
       console.log('🔄 手动触发数据迁移...');
-      await storage.forceMigration();
+      await (storage as any).forceMigration();
       window.location.reload();
     };
     
@@ -112,19 +114,33 @@ const App = () => {
     console.log('  - exportBackup() - 导出备份');
   }, []); // 只在组件挂载时执行一次
 
-  // --- 自动保存到数据库（防抖） ---
+  // --- 自动保存到数据库（防抖 + 并发控制） ---
+  const savingRef = useRef(false); // 保存锁：防止并发保存
+  
   useEffect(() => {
     // 跳过初始加载时的保存
     if (isLoadingTasks) return;
     
     // 使用防抖，避免频繁保存导致数据库锁定
     const timeoutId = setTimeout(async () => {
+      // 如果正在保存，跳过本次保存
+      if (savingRef.current) {
+        console.log('⏳ 上一次保存还在进行中，跳过本次保存');
+        return;
+      }
+      
+      savingRef.current = true; // 加锁
       console.log('💾 准备保存任务到数据库...');
-      const success = await storage.saveTasks(tasks);
-      if (success) {
-        console.log('✅ 任务已自动保存到数据库');
-      } else {
-        console.error('❌ 保存任务失败');
+      
+      try {
+        const success = await storage.saveTasks(tasks);
+        if (success) {
+          console.log('✅ 任务已自动保存到数据库');
+        } else {
+          console.error('❌ 保存任务失败');
+        }
+      } finally {
+        savingRef.current = false; // 解锁
       }
     }, 500); // 延迟 500ms，等待连续操作完成
     
@@ -798,6 +814,25 @@ ${contextText}
         }
       };
 
+      const pushDailyReportTool: FunctionDeclaration = {
+        name: "pushDailyReport",
+        description: "MUST USE THIS TOOL when user wants to push/upload daily report to GitHub. Use this when user says '推送日报', '上传日报', '提交日报', 'push report', etc. The user will provide the report content in their message.",
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                content: { 
+                  type: Type.STRING, 
+                  description: "The complete Markdown content of the daily report that user wants to push. Extract this from user's message." 
+                },
+                date: { 
+                  type: Type.STRING, 
+                  description: "Report date in YYYY-MM-DD format. Default to today if not specified." 
+                }
+            },
+            required: ["content"]
+        }
+      };
+
       const today = new Date().toISOString().split('T')[0];
       
       const projectContext = JSON.stringify(tasks.map(t => ({
@@ -818,6 +853,7 @@ ${contextText}
       IMPORTANT - YOUR CAPABILITIES:
       1. Task Management: You can create tasks using the createTask tool
       2. Timeline Query: You HAVE ACCESS to the user's activity timeline via Screenpipe
+      3. Daily Report Push: You can push daily reports to GitHub using the pushDailyReport tool
       
       WHEN USER ASKS ABOUT THEIR ACTIVITIES (what they did, what they were doing at a specific time):
       - YOU MUST call the queryTimeline tool to get their actual activity data
@@ -831,6 +867,17 @@ ${contextText}
       - ALWAYS use queryTimeline to answer activity-related questions
       - For broad time periods (like "昨天" or "上午"), use minutesRange: 120-240
       - For specific times (like "下午3点"), use minutesRange: 30-60
+      
+      WHEN USER WANTS TO PUSH DAILY REPORT:
+      - YOU MUST call the pushDailyReport tool
+      - Examples that REQUIRE pushDailyReport:
+        * "帮我推送日报" + [report content] → call pushDailyReport(content, today)
+        * "上传今天的日报" + [report content] → call pushDailyReport(content, today)
+        * "提交日报到GitHub" + [report content] → call pushDailyReport(content, today)
+      
+      - The user will paste the report content in their message
+      - Extract the complete report content from their message
+      - If no date specified, use today's date
       
       Context Memory:
       - Remember the user's previous requests from the conversation history
@@ -852,7 +899,7 @@ ${contextText}
         model: modelName,
         contents: [...historyContent, currentContent],
         config: {
-            tools: [{ functionDeclarations: [createTaskTool, queryTimelineTool] }],
+            tools: [{ functionDeclarations: [createTaskTool, queryTimelineTool, pushDailyReportTool] }],
             systemInstruction: systemInstruction
         }
       });
@@ -871,12 +918,46 @@ ${contextText}
           // Handle Multiple Function Calls
           const newTasksCreated: any[] = [];
           let timelineResults: string = "";
+          let pushReportResult: string = "";
           
           for (const call of calls) {
               if (call.name === "createTask") {
                   const args = call.args as any;
                   const newTask = createAiTask(args);
                   newTasksCreated.push(newTask);
+              } else if (call.name === "pushDailyReport") {
+                  const args = call.args as any;
+                  const reportContent = args.content || "";
+                  const reportDate = args.date || today;
+                  
+                  console.log('📤 [AI推送] 开始推送日报...');
+                  console.log('📤 [AI推送] 日期:', reportDate);
+                  console.log('📤 [AI推送] 内容长度:', reportContent.length);
+                  
+                  try {
+                    // 检查是否有缓存的 GitHub 配置
+                    const githubConfig = loadGitHubConfig();
+                    
+                    if (!githubConfig || !githubConfig.pat || !githubConfig.memberName || !githubConfig.teamDir) {
+                      pushReportResult = `\n⚠️ 推送失败：未配置 GitHub 信息\n\n请先在 Insights 视图手动推送一次日报，并勾选"记住 PAT"，下次就可以通过我直接推送了！`;
+                      console.warn('⚠️ [AI推送] 未找到 GitHub 配置');
+                    } else {
+                      // 调用 Tauri 命令推送日报
+                      const result = await invoke('push_daily_report', {
+                        date: reportDate,
+                        content: reportContent,
+                        githubPat: githubConfig.pat,
+                        memberId: githubConfig.memberName,
+                        teamDir: githubConfig.teamDir
+                      });
+                      
+                      console.log('✅ [AI推送] 推送成功:', result);
+                      pushReportResult = `\n✅ 日报推送成功！\n\n📁 已推送到 GitHub 仓库\n📅 日期：${reportDate}\n👤 成员：${githubConfig.memberName}\n🌏 团队：${githubConfig.teamDir}`;
+                    }
+                  } catch (error: any) {
+                    console.error('❌ [AI推送] 推送失败:', error);
+                    pushReportResult = `\n❌ 推送失败：${error.toString()}\n\n可能的原因：\n  • GitHub PAT 已过期或无效\n  • 网络连接问题\n  • 权限不足`;
+                  }
               } else if (call.name === "queryTimeline") {
                   const args = call.args as any;
                   
@@ -1019,6 +1100,10 @@ ${contextText}
           
           if (timelineResults) {
             followUpPrompt += `\n\nTIMELINE QUERY RESULTS:${timelineResults}\n\nPlease summarize these activities for the user in a friendly way. Mention the most important apps and activities.`;
+          }
+          
+          if (pushReportResult) {
+            followUpPrompt += `\n\nDAILY REPORT PUSH RESULT:${pushReportResult}\n\nInform the user about the push result clearly and friendly.`;
           }
           
           const response2 = await ai.generateContent({

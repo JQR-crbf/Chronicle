@@ -82,24 +82,32 @@ export const ChatSidebar = ({
 
       <div className="p-4 bg-white/60 border-t border-white backdrop-blur-md">
         <form onSubmit={onSubmit} className="relative group">
-          <input 
-            type="text" 
+          <textarea 
             value={input}
             onChange={(e) => onInputChange(e.target.value)}
-            placeholder="问我任何事情..."
+            onKeyDown={(e) => {
+              // Ctrl/Cmd + Enter 发送
+              if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                onSubmit(e as any);
+              }
+            }}
+            placeholder="问我任何事情...&#10;💡 Ctrl/Cmd + Enter 发送&#10;💡 可粘贴多行日报内容"
             disabled={isStreaming}
-            className="w-full bg-white border border-stone-200/50 rounded-2xl py-3.5 pl-5 pr-12 text-sm focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all shadow-sm group-hover:shadow-md"
+            rows={4}
+            className="w-full bg-white border border-stone-200/50 rounded-2xl py-3.5 pl-5 pr-12 text-sm focus:ring-2 focus:ring-rose-200 focus:border-rose-300 transition-all shadow-sm group-hover:shadow-md resize-none"
           />
           <button 
             type="submit"
             disabled={!input.trim() || isStreaming}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-rose-500 text-white rounded-xl hover:bg-rose-600 disabled:opacity-50 disabled:bg-stone-300 transition-all shadow-rose-200 hover:shadow-lg active:scale-95"
+            className="absolute right-2 bottom-2 p-2 bg-rose-500 text-white rounded-xl hover:bg-rose-600 disabled:opacity-50 disabled:bg-stone-300 transition-all shadow-rose-200 hover:shadow-lg active:scale-95"
+            title="发送 (Ctrl/Cmd + Enter)"
           >
             <SendIcon className="w-4 h-4" />
           </button>
         </form>
         <div className="mt-3 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-          {["帮我建个任务 ✨", "进度总结 📊", "未完成任务? 🤔"].map(q => (
+          {["帮我建个任务 ✨", "进度总结 📊", "推送今日日报 🚀"].map(q => (
             <button 
               key={q}
               onClick={() => onQuickQuestion(q)}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { loadGitHubConfig, saveGitHubConfig } from '../../utils/githubConfig';
 
 // 声明 Tauri 全局类型
 declare global {
@@ -19,17 +20,28 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
     const [showPat, setShowPat] = useState(false);
     const [memberId, setMemberId] = useState('');
     const [teamDir, setTeamDir] = useState('');
+    const [rememberPat, setRememberPat] = useState(false);
     const [currentPath, setCurrentPath] = useState('~/Documents/Chronicle/日报');
 
     useEffect(() => {
         if (isOpen) {
-            setPat('');
+            // 从 localStorage 读取缓存的配置
+            const savedConfig = loadGitHubConfig();
+            if (savedConfig) {
+                setPat(savedConfig.pat);
+                setMemberId(savedConfig.memberName);
+                setTeamDir(savedConfig.teamDir);
+                setRememberPat(!!savedConfig.pat); // 如果有保存的 PAT，默认勾选
+            } else {
+                // 兼容旧的缓存方式
+                const savedMemberId = localStorage.getItem('github_member_id') || '金倩如';
+                const savedTeamDir = localStorage.getItem('github_team_dir') || '中国团队 china-team';
+                setPat('');
+                setMemberId(savedMemberId);
+                setTeamDir(savedTeamDir);
+                setRememberPat(false);
+            }
             setShowPat(false);
-            // 从 localStorage 读取上次的输入
-            const savedMemberId = localStorage.getItem('github_member_id') || '金倩如';
-            const savedTeamDir = localStorage.getItem('github_team_dir') || '中国团队 china-team';
-            setMemberId(savedMemberId);
-            setTeamDir(savedTeamDir);
             
             // 获取当前保存路径
             if (window.__TAURI__) {
@@ -51,9 +63,21 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (pat.trim() && memberId.trim() && teamDir.trim()) {
-            // 保存到 localStorage 以便下次使用
-            localStorage.setItem('github_member_id', memberId.trim());
-            localStorage.setItem('github_team_dir', teamDir.trim());
+            // 根据用户选择决定是否保存 PAT
+            if (rememberPat) {
+                // 保存完整配置（包括 PAT）
+                saveGitHubConfig({
+                    pat: pat.trim(),
+                    memberName: memberId.trim(),
+                    teamDir: teamDir.trim()
+                });
+                console.log('✅ 已保存 GitHub 配置（包括 PAT）');
+            } else {
+                // 只保存成员名称和团队目录（兼容旧方式）
+                localStorage.setItem('github_member_id', memberId.trim());
+                localStorage.setItem('github_team_dir', teamDir.trim());
+                console.log('✅ 已保存成员名称和团队目录（未保存 PAT）');
+            }
             onConfirm(pat.trim(), memberId.trim(), teamDir.trim());
         }
     };
@@ -76,7 +100,7 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
                     </h3>
                     <p className="text-sm text-stone-600 leading-relaxed">
                         推送日报到 AIEC Team Hub 需要 GitHub PAT。<br/>
-                        您的 PAT 不会被保存，仅用于本次推送。
+                        您可以选择记住 PAT，下次使用将自动填充。
                     </p>
                     
                     {/* 显示当前保存路径 */}
@@ -125,6 +149,20 @@ export const PatInputModal: React.FC<PatInputModalProps> = ({ isOpen, onConfirm,
                                 {showPat ? '🙈' : '👁️'}
                             </button>
                         </div>
+                        
+                        {/* 记住 PAT 选项 */}
+                        <label className="flex items-center gap-2 mt-3 cursor-pointer group">
+                            <input
+                                type="checkbox"
+                                checked={rememberPat}
+                                onChange={(e) => setRememberPat(e.target.checked)}
+                                className="w-4 h-4 text-violet-500 border-stone-300 rounded focus:ring-2 focus:ring-violet-100 cursor-pointer"
+                            />
+                            <span className="text-xs text-stone-600 group-hover:text-stone-800 font-medium">
+                                🔐 记住 PAT（保存到本地，下次自动填充）
+                            </span>
+                        </label>
+                        
                         <p className="text-xs text-stone-400 mt-2">
                             💡 创建 PAT: 
                             <a 
