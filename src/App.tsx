@@ -446,6 +446,28 @@ ${contextText}
     return newTask;
   };
 
+  /**
+   * 根据任务标题查找任务（支持模糊匹配）
+   * @returns null - 未找到任务 | Task - 找到唯一任务 | Task[] - 找到多个任务
+   */
+  const findTaskByTitle = (taskTitle: string): { type: 'none' | 'single' | 'multiple', tasks?: Task | Task[] } => {
+    const searchTerm = taskTitle.toLowerCase().trim();
+    
+    // 模糊匹配：任务标题包含搜索词，或搜索词包含任务标题
+    const matchedTasks = tasks.filter(t => 
+      t.title.toLowerCase().includes(searchTerm) ||
+      searchTerm.includes(t.title.toLowerCase())
+    );
+    
+    if (matchedTasks.length === 0) {
+      return { type: 'none' };
+    } else if (matchedTasks.length === 1) {
+      return { type: 'single', tasks: matchedTasks[0] };
+    } else {
+      return { type: 'multiple', tasks: matchedTasks };
+    }
+  };
+
   const updateTask = (updatedTask: Task) => {
     const now = new Date().toISOString();
     const oldTask = tasks.find(t => t.id === updatedTask.id);
@@ -833,6 +855,39 @@ ${contextText}
         }
       };
 
+      const updateTaskTool: FunctionDeclaration = {
+        name: "updateTask",
+        description: "Update an existing task's properties. Use when user wants to change task status, description, priority, or due date. Supports partial task name matching.",
+        parameters: {
+            type: Type.OBJECT,
+            properties: {
+                taskTitle: { 
+                  type: Type.STRING, 
+                  description: "Task name or keywords to find the task. Supports partial matching. Example: '买猫粮', '日报', '学习'" 
+                },
+                status: { 
+                  type: Type.STRING, 
+                  enum: ["To Do", "In Progress", "Done"],
+                  description: "New status (optional). Map user intent: '完成/做完/已完成/完成啦' → 'Done'; '开始/进行中/开始做' → 'In Progress'; '待办/还没做/改回待办' → 'To Do'" 
+                },
+                description: { 
+                  type: Type.STRING, 
+                  description: "New task description (optional)" 
+                },
+                priority: { 
+                  type: Type.STRING, 
+                  enum: ["Low", "Medium", "High"],
+                  description: "New priority (optional). Map: '低' → 'Low', '中' → 'Medium', '高' → 'High'" 
+                },
+                dueDate: { 
+                  type: Type.STRING, 
+                  description: "New due date in YYYY-MM-DD format (optional)" 
+                }
+            },
+            required: ["taskTitle"]
+        }
+      };
+
       const today = new Date().toISOString().split('T')[0];
       
       const projectContext = JSON.stringify(tasks.map(t => ({
@@ -851,9 +906,20 @@ ${contextText}
       ${relatedTasksInfo}
       
       IMPORTANT - YOUR CAPABILITIES:
-      1. Task Management: You can create tasks using the createTask tool
+      1. Task Management: 
+         - Create tasks using the createTask tool
+         - Update tasks using the updateTask tool (change status, description, priority, due date)
       2. Timeline Query: You HAVE ACCESS to the user's activity timeline via Screenpipe
       3. Daily Report Push: You can push daily reports to GitHub using the pushDailyReport tool
+      
+      WHEN USER WANTS TO UPDATE A TASK:
+      - YOU MUST call the updateTask tool
+      - Examples that REQUIRE updateTask:
+        * "把买猫粮标记为完成" → call updateTask("买猫粮", {status: "Done"})
+        * "买猫粮完成了" → call updateTask("买猫粮", {status: "Done"})
+        * "开始做日报" → call updateTask("日报", {status: "In Progress"})
+        * "把学习的描述改为学习React Hooks" → call updateTask("学习", {description: "学习React Hooks"})
+        * "把写代码改为高优先级" → call updateTask("写代码", {priority: "High"})
       
       WHEN USER ASKS ABOUT THEIR ACTIVITIES (what they did, what they were doing at a specific time):
       - YOU MUST call the queryTimeline tool to get their actual activity data
@@ -899,7 +965,7 @@ ${contextText}
         model: modelName,
         contents: [...historyContent, currentContent],
         config: {
-            tools: [{ functionDeclarations: [createTaskTool, queryTimelineTool, pushDailyReportTool] }],
+            tools: [{ functionDeclarations: [createTaskTool, updateTaskTool, queryTimelineTool, pushDailyReportTool] }],
             systemInstruction: systemInstruction
         }
       });
@@ -917,6 +983,7 @@ ${contextText}
           console.log('🔧 Function Calls Detected:', calls.map((c: any) => ({ name: c.name, args: c.args })));
           // Handle Multiple Function Calls
           const newTasksCreated: any[] = [];
+          const tasksUpdated: any[] = [];
           let timelineResults: string = "";
           let pushReportResult: string = "";
           
@@ -925,6 +992,75 @@ ${contextText}
                   const args = call.args as any;
                   const newTask = createAiTask(args);
                   newTasksCreated.push(newTask);
+              } else if (call.name === "updateTask") {
+                  const args = call.args as any;
+                  const { taskTitle, status, description, priority, dueDate } = args;
+                  
+                  console.log('🔄 [AI更新] 尝试更新任务:', taskTitle);
+                  
+                  // 查找任务
+                  const findResult = findTaskByTitle(taskTitle);
+                  
+                  if (findResult.type === 'none') {
+                    tasksUpdated.push({
+                      success: false,
+                      message: `没有找到包含"${taskTitle}"的任务。你可以说"列出所有任务"查看当前任务列表。`
+                    });
+                  } else if (findResult.type === 'multiple') {
+                    const matchedTasks = findResult.tasks as Task[];
+                    const taskList = matchedTasks.map(t => 
+                      `  • ${t.title} (${STATUS_LABELS[t.status]})`
+                    ).join('\n');
+                    tasksUpdated.push({
+                      success: false,
+                      message: `找到 ${matchedTasks.length} 个相关任务，请说得更具体一些：\n${taskList}`
+                    });
+                  } else {
+                    // 找到唯一任务
+                    const task = findResult.tasks as Task;
+                    const oldStatus = task.status;
+                    
+                    // 构建更新后的任务
+                    const updatedFields: Partial<Task> = {};
+                    if (status) updatedFields.status = status as Status;
+                    if (description !== undefined) updatedFields.description = description;
+                    if (priority) updatedFields.priority = priority as Priority;
+                    if (dueDate) updatedFields.dueDate = dueDate;
+                    
+                    // 如果没有任何更新字段，提示用户
+                    if (Object.keys(updatedFields).length === 0) {
+                      tasksUpdated.push({
+                        success: false,
+                        message: `请告诉我要更新任务"${task.title}"的哪些内容（状态、描述、优先级或截止日期）`
+                      });
+                    } else {
+                      // 执行更新
+                      updateTask({ ...task, ...updatedFields });
+                      
+                      // 生成更新说明
+                      const updates: string[] = [];
+                      if (status && status !== oldStatus) {
+                        updates.push(`状态: ${STATUS_LABELS[oldStatus]} → ${STATUS_LABELS[status as Status]}`);
+                      }
+                      if (description !== undefined) {
+                        updates.push(`描述: 已更新`);
+                      }
+                      if (priority) {
+                        updates.push(`优先级: ${PRIORITY_LABELS[priority as Priority]}`);
+                      }
+                      if (dueDate) {
+                        updates.push(`截止日期: ${dueDate}`);
+                      }
+                      
+                      console.log('✅ [AI更新] 更新成功:', task.title, updates);
+                      
+                      tasksUpdated.push({
+                        success: true,
+                        task: task,
+                        message: `成功更新任务"${task.title}"✅\n${updates.join('\n')}`
+                      });
+                    }
+                  }
               } else if (call.name === "pushDailyReport") {
                   const args = call.args as any;
                   const reportContent = args.content || "";
@@ -1104,6 +1240,13 @@ ${contextText}
           
           if (pushReportResult) {
             followUpPrompt += `\n\nDAILY REPORT PUSH RESULT:${pushReportResult}\n\nInform the user about the push result clearly and friendly.`;
+          }
+          
+          if (tasksUpdated.length > 0) {
+            const updateResults = tasksUpdated.map(r => 
+              r.success ? `✅ ${r.message}` : `❌ ${r.message}`
+            ).join('\n');
+            followUpPrompt += `\n\nTASK UPDATE RESULTS:\n${updateResults}\n\nInform the user about these task updates in a friendly and clear way.`;
           }
           
           const response2 = await ai.generateContent({
